@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+# the sample data/transactions.csv IS committed (400 KB, reproducible with tools/make_csv.py); other generated files are not
+out/
+*.tmp
