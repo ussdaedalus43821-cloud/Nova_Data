@@ -1,8 +1,7 @@
 # Vendored NovaLang
 
-Copied unmodified from the Nova_Lang repository, branch `m13/slice-3-native-tier` (the native standard-module tier, on top of
-`develop` at **1029fcf**, the merge of pull request 5: `std:decimal`, `std:math`, `std:format`). It moves to a `develop` commit when
-that branch is merged; until then this repository is not mergeable to `main`.
+Copied unmodified from the Nova_Lang repository, `develop` at **0192f5b** (the merge of pull request 6: the native standard-module tier,
+`std:files`, `chr`/`ord`, and `std:decimal` on the native tier). Every file below was compared byte for byte with that commit.
 
 | File | Purpose |
 | --- | --- |
