@@ -128,13 +128,28 @@ class Ceiling(unittest.TestCase):
         self.dir = c.tempdir()
         self.addCleanup(c.cleanup, self.dir)
 
-    def test_G036_a_csv_over_one_million_characters_is_refused_in_the_sandbox_and_read_whole_outside_it(self):
-        path = c.make_synthetic(self.dir, 26000, "big.csv")  # 1,036,183 characters
+    def test_G036_a_csv_over_one_million_characters_is_read_in_the_sandbox_with_std_files(self):
+        # Before std:files the program read the file whole with `read`, and a file over 1,000,000 characters was refused with
+        # "a string cannot grow beyond 1000000 characters". Blank lines are cheap, so this file is over the limit without
+        # costing the 5 s time limit: the point is that the READ no longer fails.
+        rows = open(c.SAMPLE, encoding="utf-8", newline="").read().splitlines()[:6]
+        text = rows[0] + "\n" + (" " * 99 + "\n") * 12000 + "\n".join(rows[1:]) + "\n"
+        path = c.write(self.dir, "padded.csv", text)
         with open(path, encoding="utf-8", newline="") as f:
             self.assertGreater(len(f.read()), 1000000)
         done = c.run(path, profile="restricted")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("a string cannot grow", done.stdout)
+        self.assertEqual(c.parse(done.stdout).total[1], c.oracle_file(path).grand)
+
+    def test_G036_what_still_stops_a_big_file_is_the_time_limit_not_the_string_limit(self):
+        # 26,000 rows (1,036,183 characters) used to die with the string-limit error; now it is read, and the program
+        # runs out of the 5 s budget parsing it, as 20,000 rows do (the ceiling is the time, G-042). Not pinned to a row count.
+        path = c.make_synthetic(self.dir, 40000, "big.csv")
+        done = c.run(path, profile="restricted")
         self.assertEqual(done.returncode, 1)
-        self.assertIn("a string cannot grow beyond 1000000 characters", done.stdout)
+        self.assertIn("LimitError: time limit of 5000 ms exceeded", done.stdout + done.stderr)
+        self.assertNotIn("a string cannot grow", done.stdout + done.stderr)
         trusted = c.run(path)
         self.assertEqual(trusted.returncode, 0, trusted.stderr)
         self.assertEqual(c.parse(trusted.stdout).total[1], c.oracle_file(path).grand)
@@ -147,14 +162,14 @@ class Ceiling(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn("LimitError: time limit of 5000 ms exceeded", done.stdout + done.stderr)
 
-    def test_G036_one_character_decides(self):
-        # exactly 1,000,000 characters reads; one more does not (the same boundary as Nova_Log)
-        filler = "x" * (1000000 - len(HEADER_ROW))
-        ok = c.write(self.dir, "ok.csv", HEADER_ROW + filler[:-1] + "\n")
-        over = c.write(self.dir, "over.csv", HEADER_ROW + filler + "\n")
-        self.assertEqual(os.path.getsize(ok), 1000000)
-        self.assertEqual(c.run(ok, profile="restricted").returncode, 0)
-        self.assertEqual(c.run(over, profile="restricted").returncode, 1)
+    def test_G036_one_line_over_the_string_limit_is_still_refused_and_one_at_the_limit_is_read(self):
+        # The limit now applies to each LINE, not to the file: a line of 1,000,001 characters is refused by std:files with
+        # the limit's own message, and the program reports it as a file it cannot read.
+        over = c.write(self.dir, "over.csv", HEADER_ROW + "x" * 1000001 + "\n")
+        done = c.run(over, profile="restricted")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("a string cannot grow beyond 1000000 characters", done.stdout)
+        self.assertIn("nova_data: cannot read", done.stdout)
 
 
 if __name__ == "__main__":

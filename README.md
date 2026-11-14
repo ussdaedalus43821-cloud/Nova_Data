@@ -113,7 +113,7 @@ refused, and the CSV is byte-for-byte unchanged afterwards (SHA-256 before and a
 | 10,000 (the sample) | ok, about 2.9 s of the 5 s time limit |
 | 15,000 | ok, 4.2 s |
 | 20,000 | **refused**: `LimitError: time limit of 5000 ms exceeded` |
-| 26,000 | **refused**: `a string cannot grow beyond 1000000 characters` (G-036; the program still reads the file with `read`, and `std:files.lines` would lift that one); the same file reads on `trusted` |
+| 26,000 and up | **refused**: `LimitError: time limit of 5000 ms exceeded`. Before `std:files` this row died earlier, on `a string cannot grow beyond 1000000 characters` (G-036); the program now reads the file in pieces, so the string limit applies to each line only and the time limit is the ceiling |
 
 So the sandbox can do **10,000 rows comfortably and about 15,000 at most** (it was about 20,000 with the hand-written cents: the
 exact decimals cost about 50% more per row, the price of the library; the first, pure-NovaLang version of `std:decimal` made it
