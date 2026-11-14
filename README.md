@@ -1,8 +1,10 @@
 # Nova_Data
 
+> **Updated for NovaLang 2.3 (M13): money now goes through NovaLang's own `std:decimal` and `std:format` instead of hand-written integer-cent helpers; the report is byte for byte the same (see "Results").**
+>
 > **The fourth proof of concept for [NovaLang](https://github.com/ussdaedalus43821-cloud/Nova_Lang), after [Nova_Stats](https://github.com/ussdaedalus43821-cloud/Nova_Stats), [Nova_Sort](https://github.com/ussdaedalus43821-cloud/Nova_Sort) and [Nova_Log](https://github.com/ussdaedalus43821-cloud/Nova_Log).**
 > A spending report from a CSV of financial transactions, written entirely in NovaLang: one program, no Python host,
-> no regular expressions. It tests **floating-point math and currency formatting**, in the **`restricted` sandbox**.
+> no regular expressions, and no imports but NovaLang's own standard modules. It tests **floating-point math and currency formatting**, in the **`restricted` sandbox**.
 
 It reads `Date,Description,Amount,Category`, totals the spending per category, finds the largest single transaction and
 prints a terminal report with dollar amounts (`$1,250.50`) and bar charts.
@@ -59,11 +61,19 @@ Needs only Python 3 to start NovaLang.
 NovaLang has no decimal type, `round` is half-to-even (`round(0.125, 2)` is `0.12`), `str(5.0)` is `5`, and `//` rounds
 toward minus infinity so `-1250050 // 100` is `-12501` ([`docs/GAPS.md`](docs/GAPS.md) G-043 to G-045). So:
 
-1. An amount such as `"1,250.50"` is **read by hand into integer cents** (`125050`): sign, `$`, parentheses, thousands
-   separators, one or two decimals. More than two decimals is rejected, not rounded.
-2. **Every sum is an integer.** NovaLang integers are exact at any size.
-3. `money(cents)` is the only place cents become text: sign off, `//` and `%` on the magnitude, commas, `.dd`.
-4. Anything that must round (averages, percentages, bar widths) uses an integer half-up divide, never `round`.
+1. An amount such as `"1,250.50"` is **checked by hand and read into an exact decimal** by `std:decimal`: sign, `$`,
+   parentheses, thousands separators, one or two decimals are accepted or refused with a reason. More than two decimals is
+   rejected, not rounded.
+2. **Every sum is a decimal** (`dec.add`), exact at any size.
+3. `money(amount)` is the only place an amount becomes text: sign off, `std:decimal` for the digits, `std:format`'s
+   `grouped` for the commas.
+4. Anything that must round (averages, percentages, bar widths) is `dec.div(..., "half_up")` with the places spelled
+   out, never `round`.
+
+Before NovaLang had `std:decimal` (it arrived in 2.3, M13 slice 2) this program read amounts into integer cents by hand
+and divided with its own half-up routine: about 70 lines of helpers (`parse_cents`, `money`, `div_round`, `group_digits`,
+`two_digits`). They are deleted; the report printed for the sample is **byte for byte the same** (compared with the output of
+the previous version, apart from the timing line), and every test that compared it with the `decimal.Decimal` oracle still passes.
 5. A naive **float** sum is kept on the side purely to be compared (the *Precision check*). On this file the error is
    $0.000000008 after 9,993 additions: tiny, and the point is that the exact figure does not depend on it.
 
@@ -100,19 +110,21 @@ refused, and the CSV is byte-for-byte unchanged afterwards (SHA-256 before and a
 
 | Rows | Result |
 | --- | --- |
-| 10,000 (the sample) | ok, about 2 s of the 5 s time limit |
-| 20,000 | ok, 4.07 s |
-| 25,000 | ok, but 4.94 s: no margin |
-| 26,000 | **refused**: `a string cannot grow beyond 1000000 characters` (G-036); the same file reads on `trusted` |
+| 10,000 (the sample) | ok, about 2.9 s of the 5 s time limit |
+| 15,000 | ok, 4.2 s |
+| 20,000 | **refused**: `LimitError: time limit of 5000 ms exceeded` |
+| 26,000 | **refused**: `a string cannot grow beyond 1000000 characters` (G-036; the program still reads the file with `read`, and `std:files.lines` would lift that one); the same file reads on `trusted` |
 
-So the sandbox can do **10,000 rows comfortably and about 20,000 at most**. On the self-hosted engine (`--bootstrap`)
+So the sandbox can do **10,000 rows comfortably and about 15,000 at most** (it was about 20,000 with the hand-written cents: the
+exact decimals cost about 50% more per row, the price of the library; the first, pure-NovaLang version of `std:decimal` made it
+four times slower and was replaced by a native one for exactly this reason). On the self-hosted engine (`--bootstrap`)
 the 5 s budget ends at roughly 250 rows (G-042). The 25,000-row figure is measured, not pinned in a test (it would be flaky).
 
 ## Results
 
 | | |
 | --- | --- |
-| Tests | **81**, all green: 13 helper tests, 40 behaviour, 14 gap probes, 14 sandbox |
+| Tests | **82**, all green: 13 helper tests, 41 behaviour, 14 gap probes, 14 sandbox |
 | Oracle | independent Python: the `csv` module (strict) and `decimal.Decimal`; every number in the report is compared |
 | Engines | VM, tree-walker (`--tree-walk`) and self-hosted (`--bootstrap`) print the same report |
 | Fuzz | 40 seeded random files of valid and invalid rows, plus hundreds of random amounts, dates and CSV lines per helper |
@@ -131,12 +143,12 @@ parser and a formatter ([G-044](docs/GAPS.md)). The traps are the ones that fail
 
 | Path | Role |
 | --- | --- |
-| `nova_data.nova` | the program: parse, total, format, report (about 670 lines) |
+| `nova_data.nova` | the program: parse, total, format, report (about 650 lines) |
 | `data/transactions.csv` | the sample: 10,000 rows, seeded, with a few bad rows on purpose |
 | `tools/make_csv.py` | the seeded generator (the only thing here that needs Python besides the tests) |
 | `tests/` | `test_units.py` helpers vs oracles, `test_data.py` whole reports vs the oracle, `test_gaps.py` gap probes, `test_sandbox.py` restricted runs and the ceiling |
 | `docs/GAPS.md` | every gap found (G-043 to G-050) and what worked |
-| `novalang/` | the interpreter, copied unmodified from commit `f458f1d` (see `novalang/VENDORED.md`) |
+| `novalang/` | the interpreter, standard modules and the tool files it needs, copied unmodified from the NovaLang commit named in `novalang/VENDORED.md` |
 
 ## Test
 

@@ -378,8 +378,15 @@ class Source(unittest.TestCase):
     def test_no_regex_import_python_or_file_writes(self):
         import re
         code = self.code()
-        for name in ["regex", "import", "python", "write", "remove", "delete", "rename", "copy", "append", "mkdir", "stdin", "env"]:
+        for name in ["regex", "python", "write", "remove", "delete", "rename", "copy", "append", "mkdir", "stdin", "env"]:
             self.assertIsNone(re.search(r"\b%s\b" % name, code), "nova_data.nova uses " + name)
+
+    def test_the_only_imports_are_the_standard_decimal_and_format_modules(self):
+        import re
+        with open(c.PROGRAM, encoding="utf-8") as f:
+            imports = [line.strip() for line in f if line.lstrip().startswith("import")]
+        self.assertEqual(imports, ['import "std:decimal" as dec', 'import "std:format" as fmt'])
+        self.assertIsNone(re.search(r"\bimport\b", self.code().replace("import ", "", 2)), "an import in the middle of the program")
 
     def test_no_round_anywhere_because_round_is_half_to_even(self):
         import re

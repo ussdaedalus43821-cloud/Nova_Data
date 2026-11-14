@@ -29,6 +29,10 @@ def nova(body, engine="vm"):
         c.cleanup(d)
 
 
+# cents (an integer) as the amount the program's helpers take: an exact decimal with two places
+AS_AMOUNT = 'def D(c) { return dec.div(dec.from_int(c), dec.from_int(100), 2, "down") }\n'
+
+
 def listing(items):
     return "[" + ", ".join(items) + "]"
 
@@ -39,7 +43,7 @@ class Helpers(unittest.TestCase):
                   -1, -5, -99, -100, -101, -12345, -1250050, -100000, -99999999999]
         rng = random.Random(1)
         values += [rng.randint(-10 ** 9, 10 ** 9) for _ in range(250)] + [rng.randint(-10 ** 14, 10 ** 14) for _ in range(50)]
-        got = nova("for v in %s { print(money(v)) }" % listing(map(str, values)))
+        got = nova(AS_AMOUNT + "for v in %s { print(money(D(v))) }" % listing(map(str, values)))
         self.assertEqual(got, [c.money(v) for v in values])
 
     def test_group_digits(self):
@@ -49,26 +53,26 @@ class Helpers(unittest.TestCase):
         got = nova("for v in %s { print(group_digits(v)) }" % listing(map(str, values)))
         self.assertEqual(got, [format(v, ",") for v in values])
 
-    def test_div_round_is_half_away_from_zero_and_exact(self):
+    def test_half_up_division_through_std_decimal_is_half_away_from_zero_and_exact(self):
         rng = random.Random(3)
         pairs = [(1, 2), (-1, 2), (3, 2), (-3, 2), (5, 10), (-5, 10), (0, 7), (7, 7), (1, 3), (2, 3), (-2, 3), (25, 100), (35, 100), (-35, 100)]
         pairs += [(rng.randint(-10 ** 7, 10 ** 7), rng.randint(1, 10 ** 5)) for _ in range(300)]
         pairs += [(rng.randint(-10 ** 18, 10 ** 18), rng.randint(1, 10 ** 9)) for _ in range(40)]  # far beyond 2**53: floats would fail
-        got = nova("for p in %s { print(div_round(p[0], p[1])) }" % listing("[%d, %d]" % p for p in pairs))
+        got = nova("for p in %s { print(dec.to_int(dec.div(dec.from_int(p[0]), dec.from_int(p[1]), 0, \"half_up\"), \"half_up\")) }" % listing("[%d, %d]" % p for p in pairs))
         self.assertEqual(got, [str(c.half_up(a, b)) for a, b in pairs])
 
     def test_percent(self):
         rng = random.Random(4)
         pairs = [(0, 5), (5, 5), (1, 3), (2, 3), (1, 8), (-1, 8), (1, 1000), (1, 2000), (1, 1999), (-7, 9), (5, 0), (5, -3)]
         pairs += [(rng.randint(-10 ** 6, 10 ** 8), rng.randint(1, 10 ** 8)) for _ in range(300)]
-        got = nova("for p in %s { print(percent(p[0], p[1])) }" % listing("[%d, %d]" % p for p in pairs))
+        got = nova(AS_AMOUNT + "for p in %s { print(percent(D(p[0]), D(p[1]))) }" % listing("[%d, %d]" % p for p in pairs))
         self.assertEqual(got, [c.percent(a, b) for a, b in pairs])
 
     def test_bar(self):
         rng = random.Random(5)
         pairs = [(1, 1), (0, 5), (-3, 5), (5, 0), (1, 100000), (99999, 100000), (50, 100), (1, 8 * 20), (3, 160), (7, 160)]
         pairs += [(rng.randint(-100, 10 ** 7), rng.randint(1, 10 ** 7)) for _ in range(300)]
-        got = nova("for p in %s { print(\"|\" + bar(p[0], p[1]) + \"|\") }" % listing("[%d, %d]" % p for p in pairs))
+        got = nova(AS_AMOUNT + "for p in %s { print(\"|\" + bar(D(p[0]), D(p[1])) + \"|\") }" % listing("[%d, %d]" % p for p in pairs))
         self.assertEqual(got, ["|" + c.bar(a, b) + "|" for a, b in pairs])
 
     def test_all_digits_accepts_only_ascii_digits(self):
@@ -80,7 +84,7 @@ class Helpers(unittest.TestCase):
         want = [str(text != "" and all(ch in "0123456789" for ch in text)).lower() for text in cases]
         self.assertEqual(got, want)
 
-    def test_parse_cents_agrees_with_the_regex_and_decimal_oracle(self):
+    def test_parse_amount_agrees_with_the_regex_and_decimal_oracle(self):
         rng = random.Random(7)
         cases = ["0", "0.00", "12", "12.5", "12.50", "-12.50", "+12.50", "$12.50", "-$12.50", "(12.50)", "($12.50)", "1,250.50", "-1,250.50",
                  "1,000,000.00", "007.50", " 3.25 ", "999999999999", "999,999,999,999.99", "", " ", "abc", "1.234", "1.2.3", "5.", ".5", "--5",
@@ -93,13 +97,13 @@ class Helpers(unittest.TestCase):
             base = rng.choice(["1,250.50", "$99.99", "(45.10)", "-0.05", "12", "1,000,000", "-$3.5"])
             i = rng.randrange(len(base))
             cases.append(base[:i] + rng.choice("0123456789.,$-+() x") + base[i + 1:])
-        got = nova("for t in %s {\n let r = parse_cents(t)\n if r[1] == \"\" { print(str(r[0])) } else { print(\"bad\") }\n}" % listing(map(lit, cases)))
+        got = nova("for t in %s {\n let r = parse_amount(t)\n if r[1] == \"\" { print(str(dec.to_int(dec.mul(r[0], dec.from_int(100)), \"down\"))) } else { print(\"bad\") }\n}" % listing(map(lit, cases)))
         want = []
         for text in cases:
             cents = c.oracle_cents(text)
             want.append("bad" if cents is None else str(cents))
         bad = [(t, g, w) for t, g, w in zip(cases, got, want) if g != w]
-        self.assertEqual(bad, [], "parse_cents disagrees with the oracle (text, program, oracle)")
+        self.assertEqual(bad, [], "parse_amount disagrees with the oracle (text, program, oracle)")
 
     def test_is_date_knows_leap_years_and_month_lengths(self):
         import calendar
@@ -163,10 +167,10 @@ class Csv(unittest.TestCase):
 class Engines(unittest.TestCase):
     """The same helpers on the tree-walker and the self-hosted interpreter, on a small fixed set."""
 
-    def test_money_and_parse_cents_agree_across_engines(self):
+    def test_money_and_parse_amount_agree_across_engines(self):
         texts = ["12.50", "-12.50", "(1,250.50)", "$3", "1.234", "abc", "1,23.45", ""]
-        body = ("for t in %s {\n let r = parse_cents(t)\n if r[1] == \"\" { print(money(r[0])) } else { print(\"bad\") }\n}\n"
-                "for v in [0, 5, -5, 123456789, -123456789] { print(money(v)) }") % listing(map(lit, texts))
+        body = (AS_AMOUNT + "for t in %s {\n let r = parse_amount(t)\n if r[1] == \"\" { print(money(r[0])) } else { print(\"bad\") }\n}\n"
+                "for v in [0, 5, -5, 123456789, -123456789] { print(money(D(v))) }") % listing(map(lit, texts))
         reference = nova(body, "vm")
         for engine in ("tree", "bootstrap"):
             with self.subTest(engine=engine):
