@@ -3,7 +3,7 @@
 #   python3 novalang/novalang.py nova_data.nova TRANSACTIONS.CSV
 #
 # The whole tool is this one NovaLang program: no Python host, no regular expressions, and the only imports are
-# NovaLang's own standard modules (std:decimal, std:files and std:format). It reads
+# NovaLang's own standard modules (std:csv, std:decimal, std:files and std:format). It reads
 # Date,Description,Amount,Category records, totals them per category, finds the largest single charge and prints
 # a terminal report with dollar amounts and bar charts.
 #
@@ -24,6 +24,7 @@
 # --allow-process`: a standard module needs no `import` grant, only the capabilities it declares
 # (docs/spec/08-modules.md [mod.std] in NovaLang).
 
+import "std:csv" as csv
 import "std:decimal" as dec
 import "std:files" as files
 import "std:format" as fmt
@@ -34,7 +35,6 @@ let LAST_DAY = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 let EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
 let BAR_WIDTH = 20
 let MAX_CONTINUATION = 8
-let MAX_CATEGORIES = 999
 let ZERO = dec.parse("0.00")
 
 # ---- text helpers the standard library does not have (each points at its entry in docs/GAPS.md) ----
@@ -71,12 +71,6 @@ def money(amount) {
         sign = "-"
     }
     return sign + "$" + fmt.grouped(dec.to_string(dec.absolute(amount)), ",")
-}
-
-# The amount in whole cents, as an integer. Only the sort below needs one: sorted() cannot order pairs
-# (G-038 in Nova_Log), so each total is packed into a single number.
-def cents_of(amount) {
-    return dec.to_int(dec.mul(amount, dec.from_int(100)), "down")
 }
 
 # part / whole as a percentage with one decimal (half away from zero), "-" when whole is not positive.
@@ -235,61 +229,43 @@ def parse_amount(raw) {
     return [amount, ""]
 }
 
-# ---- CSV (RFC 4180 as far as a bank export needs it) ----
+# ---- CSV: std:csv reads the fields; this file only decides where a record ends ----
 
-# True when a line leaves a quoted field open: an odd number of quote characters.
+let BOM = "﻿"
+
+# True when a line leaves a quoted field open: an odd number of quote characters. This is the record framing
+# (how many of the lines split_lines() made belong to one record, G-047), not field parsing: it is what lets one
+# stray quote cost one row instead of the rest of the file.
 def open_quote(line) {
     return len(split(line, "\"")) % 2 == 0
 }
 
-# One record into fields: [fields, ""] or [[], "why not"]. Handles "quoted, fields", "" for a quote inside a quoted
-# field, and a trailing comma meaning one more empty field. A quote in the middle of an unquoted field, or text
-# after a closing quote, is an error rather than a guess. Everything is done with `split` and `join` on the
-# part of the line still to read, because NovaLang has no find() (G-037 in Nova_Log) and a loop over the
-# characters is about 20 times slower.
-def parse_fields(line) {
-    if not ("\"" in line) {
-        return [split(line, ","), ""]
+# One record into fields: [fields, ""] or [[], "why not"]. std:csv (RFC 4180) does the reading; a record it
+# refuses becomes a rejected row with a short reason rather than stopping the whole report.
+#  - csv.parse_with() drops one byte order mark at the start of its text, so a record that itself starts with one
+#    gets a second in front: the first is dropped and the record keeps the one it had (it is then not a date).
+#  - A record cannot have more fields than characters + 1, so that is the max_fields that never refuses one: a row
+#    with too many fields is "expected 4 fields, found N", as it always was, not a library limit.
+def read_record(line) {
+    let text = line
+    if line[:1] == BOM {
+        text = BOM + line
     }
-    let fields = []
-    let rest = line
-    while true {
-        if rest[:1] == "\"" {
-            # pieces[0] ends at the next quote. That quote is the first half of "" when the piece after it is
-            # empty and more text follows (pieces[k+1] == "" and k+2 < len); otherwise it closes the field.
-            let pieces = split(rest[1:], "\"")
-            let count = len(pieces)
-            let value = pieces[0]
-            let k = 0
-            while k + 2 < count and pieces[k + 1] == "" {
-                value = value + "\"" + pieces[k + 2]
-                k = k + 2
-            }
-            if k + 1 >= count {
-                return [[], "a quoted field is never closed"]
-            }
-            fields = fields + [value]
-            let tail = join(pieces[k + 1:], "\"")
-            if tail == "" {
-                break
-            }
-            if tail[0] != "," {
-                return [[], "text after a closing quote"]
-            }
-            rest = tail[1:]
-        } else {
-            let pieces = split(rest, ",")
-            if "\"" in pieces[0] {
-                return [[], "a quote in the middle of an unquoted field"]
-            }
-            fields = fields + [pieces[0]]
-            if len(pieces) == 1 {
-                break
-            }
-            rest = join(pieces[1:], ",")
+    try {
+        return [csv.parse_with(text, {max_fields: len(text) + 1})[0], ""]
+    } catch e {
+        let why = str(e)
+        if "never closed" in why {
+            return [[], "a quoted field is never closed"]
         }
+        if "after the closing quote" in why {
+            return [[], "text after a closing quote"]
+        }
+        if "does not start with one" in why {
+            return [[], "a quote in the middle of an unquoted field"]
+        }
+        throw(why)
     }
-    return [fields, ""]
 }
 
 # ---- the program ----
@@ -323,7 +299,7 @@ let read_done = started
 if have_clock {
     read_done = monotonic()
 }
-if len(lines) > 0 and lines[0][:1] == "﻿" {
+if len(lines) > 0 and lines[0][:1] == BOM {
     lines[0] = lines[0][1:]
 }
 
@@ -379,7 +355,7 @@ while idx < len(lines) {
             idx = next_idx
         }
     }
-    let parsed = parse_fields(line)
+    let parsed = read_record(line)
     let fields = parsed[0]
 
     if not header_done {
@@ -485,21 +461,14 @@ if not header_done {
 
 # ---- the report ----
 
-let names = sorted(keys(counts))
-if len(names) > MAX_CATEGORIES {
-    print("nova_data: more than " + str(MAX_CATEGORIES) + " categories; the sort key below packs the category number into three digits")
-    exit(1)
-}
 let grand = dec.add(charge_total, refund_total)
 
-# sorted() cannot order pairs (G-038 in Nova_Log), so each category and its total are packed into one number:
-# total in cents * 1000 + (999 - position in alphabetical order). Descending order is then "biggest total first, then
-# alphabetical". `//` and `%` floor, so this decodes exactly even when a total is negative.
-let packed = []
-for i = 0 to len(names) - 1 {
-    packed = packed + [cents_of(totals[names[i]]) * 1000 + (999 - i)]
+# Biggest total first, then alphabetical: sort the names alphabetically, then by total, descending. sorted() with a
+# key is stable, so names with the same total stay in alphabetical order.
+def total_in_cents(name) {
+    return dec.to_int(dec.mul(totals[name], dec.from_int(100)), "down")
 }
-packed = sorted(packed, true)
+let names = sorted(sorted(keys(counts)), total_in_cents, true)
 
 # ---- the layout: every column is as wide as its widest cell, so nothing collides whatever the amounts are ----
 
@@ -539,8 +508,7 @@ if valid > 0 {
     if name_width > 16 {
         name_width = 16
     }
-    for key in packed {
-        let n = names[999 - key % 1000]
+    for n in names {
         cell_name = cell_name + [pad(fit(n, name_width), name_width)]
         cell_n = cell_n + [group_digits(counts[n])]
         cell_total = cell_total + [money(totals[n])]

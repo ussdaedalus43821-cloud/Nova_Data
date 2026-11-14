@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-# NovaLang v2.2.0 - a small language built from a hand-written lexer,
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Copyright (c) 2026 The Nova Project Contributors
+#
+# Licensed under either of
+#   * Apache License, Version 2.0 (LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
+#   * MIT license (LICENSE-MIT or http://opensource.org/licenses/MIT)
+# at your option.
+
+# NovaLang v2.4.0 - a small language built from a hand-written lexer,
 # recursive-descent parser, bytecode compiler and virtual machine.
 """
-NovaLang v2.2.0 - a bytecode compiler and VM
+NovaLang v2.4.0 - a bytecode compiler and VM
 
 Since 2.0.0 a program runs as bytecode:
 
@@ -80,12 +88,19 @@ Stage 14: an Entity-Component-System library (lib/ecs.nova) and a grid
           dialect (M10) and the opt-in restricted profile: capability
           gating, resource limits, a deterministic mode and a subprocess
           runner (M11). trusted stays the default and is unchanged.
+2.3.0:    the standard library (std: modules, with a native tier), the
+          declared stable surface and its test (M13), a regex engine of
+          our own, packages with declared capabilities and a signed
+          registry, and the compiled-artifact cache (M12).
+2.4.0:    (in development) std:date, std:hash and files.sha256_file for the
+          first product pilots (docs/design/m14-product-pilots-plan.md).
 
 No eval(). No exec(). Everything is still built by hand.
 """
 
 import bisect
 import decimal
+import hashlib
 import importlib
 import json as json_module
 import math
@@ -100,10 +115,10 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date as calendar_date, datetime, timedelta, timezone
 from types import BuiltinFunctionType, FunctionType, MethodType, ModuleType
 
-__version__ = "2.2.0"
+__version__ = "2.4.0"
 
 # A NovaLang call burns several Python frames, so give CPython some headroom
 # and enforce our own, friendlier limit in the interpreter (MAX_CALL_DEPTH).
@@ -3622,22 +3637,39 @@ def builtin_reverse(args, position):
     )
 
 
-def builtin_sorted(args, position):
-    if not 1 <= len(args) <= 2:
+def sorted_comparable(items):
+    """Can these be ordered by sorted() ([lib.collections]): all numbers and booleans (a boolean counts as 0 or 1), or all
+    strings, and no NaN (D-019)."""
+    numbers = [is_number(item) or isinstance(item, bool) for item in items]
+    texts = [isinstance(item, str) for item in items]
+    return (all(numbers) or all(texts)) and not any(isinstance(item, float) and item != item for item in items)
+
+
+def builtin_sorted(args, position, interpreter):
+    # sorted(list), sorted(list, descending), and since 2.4.0 sorted(list, key) and sorted(list, key, descending) (G-038): the key
+    # function is called once for each item, in order, and the items are ordered by what it returns, stably (items whose keys are
+    # equal keep the order they had, in either direction). The messages of the old forms are unchanged (STABLE.md).
+    keyed = len(args) >= 2 and isinstance(args[1], (NovaFunction, BuiltinFunction))
+    if not 1 <= len(args) <= (3 if keyed else 2):
         raise NovaError("sorted() takes a list and an optional true or false", position)
     items = list(list_argument(args[0], "sorted()", position))
     descending = False
+    if keyed:
+        if len(args) > 2:
+            if not isinstance(args[2], bool):
+                raise NovaError("sorted()'s third argument must be true or false", position, label="TypeError")
+            descending = args[2]
+        keys = [interpreter.call_value(args[1], [item], position) for item in items]
+        if not sorted_comparable(keys):
+            raise NovaError("sorted()'s key function must return values that can be compared with each other", position,
+                            label="TypeError")
+        order = sorted(range(len(items)), key=keys.__getitem__, reverse=descending)      # Python's sort is stable both ways
+        return [items[i] for i in order]
     if len(args) > 1:
         if not isinstance(args[1], bool):
             raise NovaError("sorted()'s second argument must be true or false", position, label="TypeError")
         descending = args[1]
-    # Numbers (a boolean counts as 0 or 1) sort among themselves and strings
-    # among themselves; any other item, a NaN, or a mixture, cannot be ordered
-    # (D-019).
-    numbers = [is_number(item) or isinstance(item, bool) for item in items]
-    texts = [isinstance(item, str) for item in items]
-    if not (all(numbers) or all(texts)) or any(
-            isinstance(item, float) and item != item for item in items):
+    if not sorted_comparable(items):
         raise NovaError("sorted() needs items that can be compared with each other", position, label="TypeError")
     items.sort(reverse=descending)
     return items
@@ -3788,7 +3820,7 @@ BUILTINS = {
     "pad": BuiltinFunction("pad", 2, builtin_pad),
     "pad_left": BuiltinFunction("pad_left", 2, builtin_pad_left),
     "reverse": BuiltinFunction("reverse", 1, builtin_reverse),
-    "sorted": BuiltinFunction("sorted", None, builtin_sorted),
+    "sorted": BuiltinFunction("sorted", None, builtin_sorted, needs_interpreter=True),
     "assert": BuiltinFunction("assert", None, builtin_assert),
     "log": BuiltinFunction("log", None, builtin_log, needs_interpreter=True),
     "map": BuiltinFunction("map", 2, builtin_map, needs_interpreter=True),
@@ -5641,7 +5673,7 @@ def is_number(value):
 # '/' in it - is a file, resolved exactly as before packages existed.
 # ---------------------------------------------------------------------------
 
-PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?\Z")   # "name", or "owner/name" ([pkg.layout])
 PACKAGE_DIR = ".nova_modules"
 
 
@@ -5689,8 +5721,11 @@ def package_of(path):
     if marker not in path:
         return None
     before, after = path.rsplit(marker, 1)
-    name = after.split(os.sep)[0]
-    return before + marker + name, name
+    parts = after.split(os.sep)
+    name = parts[0]
+    if not os.path.isfile(os.path.join(before + marker + name, "nova.json")) and len(parts) > 1:
+        name = parts[0] + "/" + parts[1]                  # "owner/name": the first folder is the owner
+    return before + marker + name.replace("/", os.sep), name
 
 
 def package_declared(directory, name, position):
@@ -6319,6 +6354,716 @@ class _HostView:
             self.interpreter.call_value(self.work, [units], position)
 
 
+# -- std:hash and files.sha256_file --------------------------------------------------------
+
+HASH_CHUNK = 64 * 1024
+
+
+def native_hash_sha256(args, position):
+    text = args[0]
+    if not isinstance(text, str):
+        raise native_error("the text for hash.sha256() needs a string, but got {}".format(type_category(text)), position)
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise native_error("the text for hash.sha256() has a character that cannot be written as UTF-8", position)
+    return hashlib.sha256(data).hexdigest()
+
+
+def native_files_sha256_file(args, position, interpreter):
+    """The SHA-256 of a file's bytes, hex, read in pieces (the file is opened, read and closed in this one call). The grant was
+    checked for this path before the call; the work is charged to the run, 4 steps for every piece."""
+    path = file_path_argument(args[0], "files.sha256_file()", position)
+    if os.path.isdir(path):
+        raise NovaError("{} is a directory, not a file".format(path), position, label="FileError")
+    meter = regex_meter(interpreter, position)
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                piece = handle.read(HASH_CHUNK)
+                if not piece:
+                    break
+                digest.update(piece)
+                meter.tick(4 * REGEX_UNIT)
+    except FileNotFoundError:
+        raise NovaError(path, position, label="FileNotFoundError")
+    except OSError as problem:
+        raise NovaError("{}: {}".format(path, problem.strerror or "cannot be read"), position, label="FileError")
+    return digest.hexdigest()
+
+
+# -- std:date -------------------------------------------------------------------------------
+#
+# Civil dates and timestamps with a numeric UTC offset, as text: a date is "2027-01-31", a timestamp is
+# "2027-01-31T13:55:36+00:00" (whole seconds, the offset always written +HH:MM). Years 1 to 9999, the
+# proleptic Gregorian calendar, no time zones and no daylight saving. Nothing here reads the clock.
+
+DATE_FORM = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})\Z", re.ASCII)
+TIMESTAMP_FORM = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})([+-])([0-9]{2}):([0-9]{2})\Z", re.ASCII)
+OFFSET_FORM = re.compile(r"(?:(Z)|([+-])([0-9]{2}):?([0-9]{2}))\Z", re.ASCII)
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DATE_DAYS_LIMIT = 4000000          # a whole number of days or seconds of this size or more is out of the calendar anyway
+DATE_SECONDS_LIMIT = 400000000000
+
+
+def date_fail(who, what, position):
+    raise native_error("date.{}() {}".format(who, what), position)
+
+
+def date_whole(who, role, value, position, limit=1000000):
+    n = decimal_whole(value)
+    if n is None:
+        date_fail(who, "needs a whole number for the {}, but got {}".format(role, type_category(value) if not isinstance(value, (int, float)) or isinstance(value, bool) else "a number with a fraction"), position)
+    if abs(n) >= limit:            # far beyond any date: refused here so that no later conversion can overflow a C long
+        date_fail(who, "has a {} that is out of the calendar".format(role), position)
+    return n
+
+
+def date_value(who, role, value, position):
+    if not isinstance(value, str):
+        date_fail(who, "needs a string for the {}, but got {}".format(role, type_category(value)), position)
+    found = DATE_FORM.match(value)
+    if found:
+        try:
+            return calendar_date(*[int(part) for part in found.groups()])
+        except ValueError:
+            pass
+    date_fail(who, "needs a date written 2027-01-31 for the {}, and {!r} is not a date of the calendar".format(role, value[:40]), position)
+
+
+def offset_minutes(text):
+    """Minutes east of UTC from `Z`, `+HH:MM` or `+HHMM`, or None."""
+    found = OFFSET_FORM.match(text)
+    if not found:
+        return None
+    if found.group(1):
+        return 0
+    hours, minutes = int(found.group(3)), int(found.group(4))
+    if hours > 23 or minutes > 59:
+        return None
+    return (hours * 60 + minutes) * (1 if found.group(2) == "+" else -1)
+
+
+def offset_text(minutes):
+    sign = "-" if minutes < 0 else "+"
+    return "{}{:02d}:{:02d}".format(sign, abs(minutes) // 60, abs(minutes) % 60)
+
+
+def offset_value(who, role, value, position):
+    if not isinstance(value, str):
+        date_fail(who, "needs a string for the {}, but got {}".format(role, type_category(value)), position)
+    minutes = offset_minutes(value)
+    if minutes is None:
+        date_fail(who, "needs an offset written Z, +01:00 or -0500 for the {}, not {!r}".format(role, value[:20]), position)
+    return minutes
+
+
+def timestamp_value(who, role, value, position):
+    """A datetime that knows its offset, from the normalized form."""
+    if not isinstance(value, str):
+        date_fail(who, "needs a string for the {}, but got {}".format(role, type_category(value)), position)
+    found = TIMESTAMP_FORM.match(value)
+    if found:
+        year, month, day, hour, minute, second = [int(found.group(i)) for i in range(1, 7)]
+        minutes = offset_minutes(found.group(7) + found.group(8) + found.group(9))
+        if minutes is not None:
+            try:
+                return datetime(year, month, day, hour, minute, second, tzinfo=timezone(timedelta(minutes=minutes)))
+            except ValueError:
+                pass
+    date_fail(who, "needs a timestamp written 2027-01-31T13:55:36+00:00 for the {}, and {!r} is not one".format(role, value[:40]), position)
+
+
+def date_text(d):
+    return "{:04d}-{:02d}-{:02d}".format(d.year, d.month, d.day)
+
+
+def timestamp_text(moment):
+    return "{:04d}-{:02d}-{:02d}T{:02d}:{:02d}:{:02d}{}".format(
+        moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second,
+        offset_text(int(moment.utcoffset().total_seconds()) // 60))
+
+
+def date_shift(who, d, days, position):
+    try:
+        return d + timedelta(days=days)
+    except OverflowError:
+        date_fail(who, "gives a date outside the years 1 to 9999", position)
+
+
+def month_length(year, month):
+    if month == 2:
+        return 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28
+    return 30 if month in (4, 6, 9, 11) else 31
+
+
+def months_shifted(who, d, months, position):
+    index = d.year * 12 + (d.month - 1) + months
+    year, month = divmod(index, 12)
+    if not 1 <= year <= 9999:
+        date_fail(who, "gives a date outside the years 1 to 9999", position)
+    return calendar_date(year, month + 1, min(d.day, month_length(year, month + 1)))     # the month-end rule: the last day if there is no such day
+
+
+def native_date_is_date(args, position):
+    if not isinstance(args[0], str):
+        date_fail("is_date", "needs a string, but got {}".format(type_category(args[0])), position)
+    found = DATE_FORM.match(args[0])
+    if not found:
+        return False
+    try:
+        calendar_date(*[int(part) for part in found.groups()])
+    except ValueError:
+        return False
+    return True
+
+
+def native_date_is_timestamp(args, position):
+    if not isinstance(args[0], str):
+        date_fail("is_timestamp", "needs a string, but got {}".format(type_category(args[0])), position)
+    try:
+        timestamp_value("is_timestamp", "text", args[0], position)
+    except NovaError:
+        return False
+    return True
+
+
+def native_date_make(args, position):
+    year, month, day = (date_whole("make", role, value, position) for role, value in (("year", args[0]), ("month", args[1]), ("day", args[2])))
+    try:
+        return date_text(calendar_date(year, month, day))
+    except ValueError:
+        date_fail("make", "has no date for year {}, month {}, day {}".format(year, month, day), position)
+
+
+def native_date_year(args, position):
+    return date_value("year", "date", args[0], position).year
+
+
+def native_date_month(args, position):
+    return date_value("month", "date", args[0], position).month
+
+
+def native_date_day(args, position):
+    return date_value("day", "date", args[0], position).day
+
+
+def native_date_is_leap(args, position):
+    year = date_whole("is_leap", "year", args[0], position)
+    if not 1 <= year <= 9999:
+        date_fail("is_leap", "needs a year from 1 to 9999", position)
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def native_date_days_in_month(args, position):
+    year, month = date_whole("days_in_month", "year", args[0], position), date_whole("days_in_month", "month", args[1], position)
+    if not 1 <= year <= 9999 or not 1 <= month <= 12:
+        date_fail("days_in_month", "needs a year from 1 to 9999 and a month from 1 to 12", position)
+    return month_length(year, month)
+
+
+def native_date_last_day_of_month(args, position):
+    d = date_value("last_day_of_month", "date", args[0], position)
+    return date_text(calendar_date(d.year, d.month, month_length(d.year, d.month)))
+
+
+def native_date_add_days(args, position):
+    d = date_value("add_days", "date", args[0], position)
+    return date_text(date_shift("add_days", d, date_whole("add_days", "number of days", args[1], position, DATE_DAYS_LIMIT), position))
+
+
+def native_date_add_months(args, position):
+    d = date_value("add_months", "date", args[0], position)
+    return date_text(months_shifted("add_months", d, date_whole("add_months", "number of months", args[1], position, 200000), position))
+
+
+def native_date_add_years(args, position):
+    d = date_value("add_years", "date", args[0], position)
+    return date_text(months_shifted("add_years", d, 12 * date_whole("add_years", "number of years", args[1], position, 20000), position))
+
+
+def native_date_diff_days(args, position):
+    return (date_value("diff_days", "first date", args[0], position) - date_value("diff_days", "second date", args[1], position)).days
+
+
+def native_date_weekday(args, position):
+    return date_value("weekday", "date", args[0], position).isoweekday()          # Monday is 1, Sunday is 7
+
+
+def native_date_day_of_year(args, position):
+    return date_value("day_of_year", "date", args[0], position).timetuple().tm_yday
+
+
+def native_date_compare(args, position):
+    a, b = args[0], args[1]
+    both_dates = isinstance(a, str) and isinstance(b, str) and DATE_FORM.match(a) and DATE_FORM.match(b)
+    if both_dates:
+        left, right = date_value("compare", "first value", a, position), date_value("compare", "second value", b, position)
+    else:
+        left, right = timestamp_value("compare", "first value", a, position), timestamp_value("compare", "second value", b, position)
+    return (left > right) - (left < right)
+
+
+# timestamps
+
+def native_date_make_timestamp(args, position):
+    names = ("year", "month", "day", "hour", "minute", "second")
+    year, month, day, hour, minute, second = (date_whole("make_timestamp", names[i], args[i], position) for i in range(6))
+    minutes = offset_value("make_timestamp", "offset", args[6], position)
+    try:
+        return timestamp_text(datetime(year, month, day, hour, minute, second, tzinfo=timezone(timedelta(minutes=minutes))))
+    except ValueError:
+        date_fail("make_timestamp", "has no timestamp for these numbers", position)
+
+
+def native_date_date_of(args, position):
+    return date_text(timestamp_value("date_of", "timestamp", args[0], position))      # the civil date in the timestamp's own offset
+
+
+def native_date_offset_of(args, position):
+    return offset_text(int(timestamp_value("offset_of", "timestamp", args[0], position).utcoffset().total_seconds()) // 60)
+
+
+def native_date_with_offset(args, position):
+    moment = timestamp_value("with_offset", "timestamp", args[0], position)
+    minutes = offset_value("with_offset", "offset", args[1], position)
+    try:
+        return timestamp_text(moment.astimezone(timezone(timedelta(minutes=minutes))))
+    except OverflowError:
+        date_fail("with_offset", "gives a timestamp outside the years 1 to 9999", position)
+
+
+def native_date_to_utc(args, position):
+    return native_date_with_offset([args[0], "Z"], position)
+
+
+def native_date_add_seconds(args, position):
+    moment = timestamp_value("add_seconds", "timestamp", args[0], position)
+    seconds = date_whole("add_seconds", "number of seconds", args[1], position, DATE_SECONDS_LIMIT)
+    try:
+        return timestamp_text(moment + timedelta(seconds=seconds))
+    except OverflowError:
+        date_fail("add_seconds", "gives a timestamp outside the years 1 to 9999", position)
+
+
+def native_date_diff_seconds(args, position):
+    delta = timestamp_value("diff_seconds", "first timestamp", args[0], position) - timestamp_value("diff_seconds", "second timestamp", args[1], position)
+    return delta.days * 86400 + delta.seconds
+
+
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def native_date_to_epoch(args, position):
+    delta = timestamp_value("to_epoch", "timestamp", args[0], position) - EPOCH
+    return delta.days * 86400 + delta.seconds
+
+
+def native_date_from_epoch(args, position):
+    seconds = date_whole("from_epoch", "seconds", args[0], position, DATE_SECONDS_LIMIT)
+    minutes = offset_value("from_epoch", "offset", args[1], position)
+    try:
+        return timestamp_text((EPOCH + timedelta(seconds=seconds)).astimezone(timezone(timedelta(minutes=minutes))))
+    except (OverflowError, ValueError):
+        date_fail("from_epoch", "gives a timestamp outside the years 1 to 9999", position)
+
+
+# formats: %Y %m %d %e %H %M %S %b %B %a %A %z %f %%  (English names, never the locale's)
+
+FORMAT_TOKENS = "YmdeHMSbBaAzf%"
+
+
+def format_tokens(who, fmt, position):
+    if not isinstance(fmt, str):
+        date_fail(who, "needs a string for the format, but got {}".format(type_category(fmt)), position)
+    out, i = [], 0
+    while i < len(fmt):
+        if fmt[i] != "%":
+            out.append(("lit", fmt[i]))
+            i += 1
+            continue
+        if i + 1 >= len(fmt) or fmt[i + 1] not in FORMAT_TOKENS:
+            date_fail(who, "does not know the format code {!r} (the codes are %Y %m %d %e %H %M %S %b %B %a %A %z %f and %%)".format(fmt[i:i + 2]), position)
+        out.append(("lit", "%") if fmt[i + 1] == "%" else ("tok", fmt[i + 1]))
+        i += 2
+    return out
+
+
+def native_date_format(args, position):
+    value, fmt = args[0], args[1]
+    tokens = format_tokens("format", fmt, position)
+    moment, stamped = None, False
+    if isinstance(value, str) and TIMESTAMP_FORM.match(value):
+        moment, stamped = timestamp_value("format", "value", value, position), True
+        d = moment.date()
+    else:
+        d = date_value("format", "value", value, position)
+    out = []
+    for kind, item in tokens:
+        if kind == "lit":
+            out.append(item)
+            continue
+        if item in "HMSzf" and not stamped:
+            date_fail("format", "has %{} but the value is a date, which has no time of day; give it a timestamp".format(item), position)
+        if item == "f":
+            date_fail("format", "cannot write %f: timestamps have whole seconds", position)
+        out.append({"Y": lambda: "{:04d}".format(d.year), "m": lambda: "{:02d}".format(d.month), "d": lambda: "{:02d}".format(d.day),
+                    "e": lambda: "{:2d}".format(d.day), "b": lambda: MONTH_NAMES[d.month - 1][:3], "B": lambda: MONTH_NAMES[d.month - 1],
+                    "a": lambda: DAY_NAMES[d.weekday()][:3], "A": lambda: DAY_NAMES[d.weekday()],
+                    "H": lambda: "{:02d}".format(moment.hour), "M": lambda: "{:02d}".format(moment.minute), "S": lambda: "{:02d}".format(moment.second),
+                    "z": lambda: offset_text(int(moment.utcoffset().total_seconds()) // 60).replace(":", "")}[item]())
+    return "".join(out)
+
+
+def parse_by_format(who, text, fmt, position):
+    """{field: value} read from `text` by `fmt`, or the error that says where it stopped."""
+    if not isinstance(text, str):
+        date_fail(who, "needs a string for the text, but got {}".format(type_category(text)), position)
+    tokens = format_tokens(who, fmt, position)
+    fields, i = {}, 0
+
+    def stop(what):
+        date_fail(who, "could not read {!r} with the format {!r}: {} at character {}".format(text[:60], fmt[:60], what, i), position)
+
+    def digits(count, name):
+        nonlocal i
+        piece = text[i:i + count]
+        if len(piece) != count or not all("0" <= c <= "9" for c in piece):
+            stop("expected {} digits for {}".format(count, name))
+        i += count
+        return int(piece)
+
+    def name_of(names, full, name):
+        nonlocal i
+        for index, candidate in enumerate(names):
+            word = candidate if full else candidate[:3]
+            if text[i:i + len(word)].lower() == word.lower():
+                i += len(word)
+                return index
+        stop("expected {}".format(name))
+
+    for kind, item in tokens:
+        if kind == "lit":
+            if text[i:i + 1] != item:
+                stop("expected {!r}".format(item))
+            i += 1
+        elif item == "Y":
+            fields["year"] = digits(4, "the year")
+        elif item == "m":
+            fields["month"] = digits(2, "the month")
+        elif item == "d":
+            fields["day"] = digits(2, "the day")
+        elif item == "e":
+            while text[i:i + 1] == " ":
+                i += 1
+            start = i
+            while i < len(text) and i - start < 2 and "0" <= text[i] <= "9":
+                i += 1
+            if i == start:
+                stop("expected the day of the month")
+            fields["day"] = int(text[start:i])
+        elif item == "H":
+            fields["hour"] = digits(2, "the hour")
+        elif item == "M":
+            fields["minute"] = digits(2, "the minute")
+        elif item == "S":
+            fields["second"] = digits(2, "the second")
+        elif item == "b":
+            fields["month"] = name_of(MONTH_NAMES, False, "a month name such as Oct") + 1
+        elif item == "B":
+            fields["month"] = name_of(MONTH_NAMES, True, "a month name such as October") + 1
+        elif item == "a":
+            fields["weekday"] = name_of(DAY_NAMES, False, "a day name such as Mon")
+        elif item == "A":
+            fields["weekday"] = name_of(DAY_NAMES, True, "a day name such as Monday")
+        elif item == "f":
+            start = i
+            while i < len(text) and "0" <= text[i] <= "9":
+                i += 1
+            if not 1 <= i - start <= 9:
+                stop("expected 1 to 9 digits of a fraction")
+        elif item == "z":
+            found = OFFSET_FORM.match(text[i:i + 6]) or OFFSET_FORM.match(text[i:i + 5]) or OFFSET_FORM.match(text[i:i + 1])
+            if not found or offset_minutes(found.group(0)) is None:
+                stop("expected an offset such as +0100, +01:00 or Z")
+            fields["offset"] = offset_minutes(found.group(0))
+            i += len(found.group(0))
+    if i != len(text):
+        stop("the text has more after the format ended")
+    return fields
+
+
+def date_from_fields(who, fields, position):
+    for needed, code in (("year", "%Y"), ("month", "%m or %b"), ("day", "%d")):
+        if needed not in fields:
+            date_fail(who, "needs the format to read the {} ({})".format(needed, code), position)
+    try:
+        d = calendar_date(fields["year"], fields["month"], fields["day"])
+    except ValueError:
+        date_fail(who, "read {:04d}-{:02d}-{:02d}, which is not a date of the calendar".format(fields["year"], fields["month"], fields["day"]), position)
+    if "weekday" in fields and fields["weekday"] != d.weekday():
+        date_fail(who, "read a day name that is not the weekday of {}".format(date_text(d)), position)
+    return d
+
+
+def native_date_parse_date(args, position):
+    return date_text(date_from_fields("parse_date", parse_by_format("parse_date", args[0], args[1], position), position))
+
+
+def timestamp_from(who, args, position, fixed_offset):
+    fields = parse_by_format(who, args[0], args[1], position)
+    d = date_from_fields(who, fields, position)
+    for needed, code in (("hour", "%H"), ("minute", "%M"), ("second", "%S")):
+        if needed not in fields:
+            date_fail(who, "needs the format to read the {} ({})".format(needed, code), position)
+    if fixed_offset is None:
+        if "offset" not in fields:
+            date_fail(who, "needs the format to read the offset (%z); if the text has none, use date.parse_timestamp_at() and give the offset", position)
+        minutes = fields["offset"]
+    else:
+        if "offset" in fields:
+            date_fail(who, "was given an offset and the format also reads one (%z): use date.parse_timestamp() instead", position)
+        minutes = fixed_offset
+    try:
+        return timestamp_text(datetime(d.year, d.month, d.day, fields["hour"], fields["minute"], fields["second"], tzinfo=timezone(timedelta(minutes=minutes))))
+    except ValueError:
+        date_fail(who, "read a time of day that does not exist", position)
+
+
+def native_date_parse_timestamp(args, position):
+    return timestamp_from("parse_timestamp", args, position, None)
+
+
+def native_date_parse_timestamp_at(args, position):
+    return timestamp_from("parse_timestamp_at", args, position, offset_value("parse_timestamp_at", "offset", args[2], position))
+
+
+# -- std:csv ---------------------------------------------------------------------------------
+#
+# RFC 4180 records ([lib.std-csv]): a field is either unquoted (no delimiter, quote or line end in it) or quoted ("...", a quote
+# inside written twice, line ends inside kept as they are). A record ends at CRLF, LF or CR; a line with nothing on it is not a
+# record; a byte order mark at the very start of the text is dropped. Anything else is an error that names the line. The work is
+# charged to the run like the matcher's: one unit for every character read or written.
+
+CSV_MAX_FIELDS = 10000
+CSV_OPTIONS = ("delimiter", "max_fields")
+_CSV_UNQUOTED = {}
+
+
+def csv_fail(who, what, position):
+    raise native_error("csv.{}() {}".format(who, what), position)
+
+
+def csv_text(who, value, position):
+    if not isinstance(value, str):
+        csv_fail(who, "needs a string for the text, but got {}".format(type_name(value)), position)
+    return value
+
+
+def csv_options(who, value, position):
+    if not isinstance(value, dict):
+        csv_fail(who, "needs a dictionary for the options, but got {}".format(type_name(value)), position)
+    for key in value:
+        if key not in CSV_OPTIONS:
+            csv_fail(who, "does not know the option '{}' (the options are delimiter and max_fields)".format(key[:40]), position)
+    delimiter, max_fields = ",", CSV_MAX_FIELDS
+    if "delimiter" in value:
+        delimiter = value["delimiter"]
+        if not isinstance(delimiter, str) or len(delimiter) != 1 or delimiter in '"\r\n':
+            csv_fail(who, "needs the delimiter to be one character that is not a quote or a line end", position)
+    if "max_fields" in value:
+        max_fields = decimal_whole(value["max_fields"])
+        if max_fields is None or max_fields < 1:
+            csv_fail(who, "needs max_fields to be a whole number of at least 1", position)
+    return delimiter, max_fields
+
+
+def _line_ends(piece):
+    """How many line ends (CRLF counts once) are in `piece`."""
+    return piece.count("\n") + piece.count("\r") - piece.count("\r\n")
+
+
+def csv_read(who, text, delimiter, max_fields, interpreter, position):
+    longest_list, _ = regex_limits(interpreter)
+    meter = regex_meter(interpreter, position)
+    unquoted = _CSV_UNQUOTED.get(delimiter)
+    if unquoted is None:
+        unquoted = _CSV_UNQUOTED[delimiter] = re.compile('[^"\r\n' + re.escape(delimiter) + "]*")
+    if text.startswith("﻿"):
+        text = text[1:]
+    rows, i, n, line = [], 0, len(text), 1
+    while i < n:
+        if text[i] in "\r\n":                                        # a line with nothing on it is not a record
+            i += 2 if text.startswith("\r\n", i) else 1
+            line += 1
+            continue
+        start, record_line, row = i, line, []
+        while True:
+            if i < n and text[i] == '"':
+                opened_on, i, parts = line, i + 1, []
+                while True:
+                    close = text.find('"', i)
+                    if close < 0:
+                        csv_fail(who, "found a quoted field that is never closed; it starts on line {}".format(opened_on), position)
+                    piece = text[i:close]
+                    line += _line_ends(piece)
+                    parts.append(piece)
+                    if text.startswith('""', close):
+                        parts.append('"')
+                        i = close + 2
+                        continue
+                    i = close + 1
+                    break
+                if i < n and text[i] != delimiter and text[i] not in "\r\n":
+                    csv_fail(who, "found text after the closing quote of a field on line {}; a quoted field must end at the delimiter or the end "
+                                  "of the line".format(line), position)
+                field = "".join(parts)
+            else:
+                end = unquoted.match(text, i).end()
+                if end < n and text[end] == '"':
+                    csv_fail(who, "found a quote inside a field that does not start with one on line {}; quote the whole field and write the "
+                                  "quote twice".format(line), position)
+                field, i = text[i:end], end
+            row.append(field)
+            if len(row) > max_fields:
+                csv_fail(who, "found more than {} fields in the record on line {} (the max_fields limit)".format(max_fields, record_line), position)
+            if i < n and text[i] == delimiter:
+                i += 1
+                continue
+            break
+        if i < n:                                                    # the line end that ends the record
+            i += 2 if text.startswith("\r\n", i) else 1
+            line += 1
+        rows.append(row)
+        if len(rows) > longest_list:
+            raise NovaError("a list cannot grow beyond {} items".format(longest_list), position)
+        meter.tick(i - start)
+    return rows
+
+
+def native_csv_parse(args, position, interpreter):
+    return csv_read("parse", csv_text("parse", args[0], position), ",", CSV_MAX_FIELDS, interpreter, position)
+
+
+def native_csv_parse_with(args, position, interpreter):
+    text = csv_text("parse_with", args[0], position)
+    delimiter, max_fields = csv_options("parse_with", args[1], position)
+    return csv_read("parse_with", text, delimiter, max_fields, interpreter, position)
+
+
+def native_csv_parse_lines(args, position, interpreter):
+    lines = args[0]
+    if not isinstance(lines, list):
+        csv_fail("parse_lines", "needs a list of strings, but got {}".format(type_name(lines)), position)
+    for number, item in enumerate(lines, 1):
+        if not isinstance(item, str):
+            csv_fail("parse_lines", "needs a list of strings, and item {} is {}".format(number, type_name(item)), position)
+    return csv_read("parse_lines", "\n".join(lines), ",", CSV_MAX_FIELDS, interpreter, position)
+
+
+def native_csv_records(args, position):
+    rows = args[0]
+    if not isinstance(rows, list):
+        csv_fail("records", "needs a list of rows, but got {}".format(type_name(rows)), position)
+    for number, row in enumerate(rows, 1):
+        if not isinstance(row, list):
+            csv_fail("records", "needs a list of rows, and row {} is {}".format(number, type_name(row)), position)
+        for place, field in enumerate(row, 1):
+            if not isinstance(field, str):
+                csv_fail("records", "needs the fields to be strings, and row {} field {} is {}".format(number, place, type_name(field)), position)
+    if not rows:
+        return []
+    header = rows[0]
+    if len(set(header)) != len(header):
+        seen = set()
+        for name in header:
+            if name in seen:
+                csv_fail("records", "found the column name '{}' twice in the header".format(name[:40]), position)
+            seen.add(name)
+    out = []
+    for number, row in enumerate(rows[1:], 2):
+        if len(row) != len(header):
+            csv_fail("records", "found {} field(s) in row {}, but the header has {}".format(len(row), number, len(header)), position)
+        out.append(dict(zip(header, row)))
+    return out
+
+
+def csv_field(who, where, value, position):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        csv_fail(who, "needs strings or numbers, and {} is {}".format(where, type_name(value)), position)
+    text = value if isinstance(value, str) else format_value(value)
+    if '"' in text or "," in text or "\r" in text or "\n" in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def csv_row(who, row, label, position):
+    if len(row) == 1 and row[0] == "":
+        return '""'                     # a record of one empty field; written bare it would be a blank line, which is no record
+    return ",".join(csv_field(who, label + "field {}".format(place), value, position) for place, value in enumerate(row, 1))
+
+
+def native_csv_format_row(args, position):
+    row = args[0]
+    if not isinstance(row, list):
+        csv_fail("format_row", "needs a list of fields, but got {}".format(type_name(row)), position)
+    if not row:
+        csv_fail("format_row", "needs at least one field", position)
+    return csv_row("format_row", row, "", position)
+
+
+def native_csv_format(args, position, interpreter):
+    rows = args[0]
+    if not isinstance(rows, list):
+        csv_fail("format", "needs a list of rows, but got {}".format(type_name(rows)), position)
+    meter = regex_meter(interpreter, position)
+    out = []
+    for number, row in enumerate(rows, 1):
+        if not isinstance(row, list):
+            csv_fail("format", "needs a list of rows, and row {} is {}".format(number, type_name(row)), position)
+        if not row:
+            csv_fail("format", "needs at least one field in row {}".format(number), position)
+        out.append(csv_row("format", row, "row {} ".format(number), position) + "\r\n")
+        meter.tick(len(out[-1]))
+    return "".join(out)
+
+
+# -- std:dict --------------------------------------------------------------------------------
+#
+# A missing value without a new global name (D-P6, [lib.std-dict]): the program says what it wants when a key is absent.
+
+def std_dict_argument(who, value, position):
+    if not isinstance(value, dict):
+        raise NovaError("dict.{}() needs a dictionary, but got {}".format(who, type_name(value)), position, label="TypeError")
+    return value
+
+
+def native_dict_get(args, position):
+    d = std_dict_argument("get", args[0], position)
+    key = args[1]
+    if not isinstance(key, str):
+        raise NovaError("dict.get() needs a string for the key, but got {}".format(type_name(key)), position, label="TypeError")
+    return d[key] if key in d else args[2]
+
+
+def native_dict_get_path(args, position):
+    value = std_dict_argument("get_path", args[0], position)
+    path = args[1]
+    if not isinstance(path, list):
+        raise NovaError("dict.get_path() needs a list of keys for the path, but got {}".format(type_name(path)), position, label="TypeError")
+    for number, key in enumerate(path, 1):
+        if not isinstance(key, str):
+            raise NovaError("dict.get_path() needs the keys of the path to be strings, and key {} is {}".format(number, type_name(key)),
+                            position, label="TypeError")
+    for key in path:
+        if not isinstance(value, dict) or key not in value:
+            return args[2]
+        value = value[key]
+    return value
+
+
 def _natives(module, table, metered=()):
     """The BuiltinFunctions of a module's natives. A function named in `metered` is also given the interpreter
     (or, for the self-hosted engine, a view of its host), to charge its work to the run."""
@@ -6350,6 +7095,44 @@ NATIVE_FUNCTIONS = {
         "to_float": (1, native_decimal_to_float, ()), "total": (1, native_decimal_total, ()),
     }),
     "text": _natives("text", {"chr": (1, native_text_chr, ()), "ord": (1, native_text_ord, ())}),
+    "hash": _natives("hash", {"sha256": (1, native_hash_sha256, ())}),
+    "csv": _natives("csv", {
+        "parse": (1, native_csv_parse, ()), "parse_with": (2, native_csv_parse_with, ()),
+        "parse_lines": (1, native_csv_parse_lines, ()), "records": (1, native_csv_records, ()),
+        "format_row": (1, native_csv_format_row, ()), "format": (1, native_csv_format, ()),
+    }, metered=("parse", "parse_with", "parse_lines", "format")),
+    "dict": _natives("dict", {"get": (3, native_dict_get, ()), "get_path": (3, native_dict_get_path, ())}),
+    "date": _natives("date", {
+        "is_date": (1, native_date_is_date, ()),
+        "is_timestamp": (1, native_date_is_timestamp, ()),
+        "make": (3, native_date_make, ()),
+        "year": (1, native_date_year, ()),
+        "month": (1, native_date_month, ()),
+        "day": (1, native_date_day, ()),
+        "is_leap": (1, native_date_is_leap, ()),
+        "days_in_month": (2, native_date_days_in_month, ()),
+        "last_day_of_month": (1, native_date_last_day_of_month, ()),
+        "add_days": (2, native_date_add_days, ()),
+        "add_months": (2, native_date_add_months, ()),
+        "add_years": (2, native_date_add_years, ()),
+        "diff_days": (2, native_date_diff_days, ()),
+        "weekday": (1, native_date_weekday, ()),
+        "day_of_year": (1, native_date_day_of_year, ()),
+        "compare": (2, native_date_compare, ()),
+        "make_timestamp": (7, native_date_make_timestamp, ()),
+        "date_of": (1, native_date_date_of, ()),
+        "offset_of": (1, native_date_offset_of, ()),
+        "with_offset": (2, native_date_with_offset, ()),
+        "to_utc": (1, native_date_to_utc, ()),
+        "add_seconds": (2, native_date_add_seconds, ()),
+        "diff_seconds": (2, native_date_diff_seconds, ()),
+        "to_epoch": (1, native_date_to_epoch, ()),
+        "from_epoch": (2, native_date_from_epoch, ()),
+        "format": (2, native_date_format, ()),
+        "parse_date": (2, native_date_parse_date, ()),
+        "parse_timestamp": (2, native_date_parse_timestamp, ()),
+        "parse_timestamp_at": (3, native_date_parse_timestamp_at, ()),
+    }),
     # not a module: the global regex() for the self-hosted engine, so that its work is charged to the engine's counters
     "builtin": _natives("builtin", {"regex": (2, native_builtin_regex, ())}, metered=("regex",)),
     "regex": _natives("regex", {
@@ -6362,7 +7145,8 @@ NATIVE_FUNCTIONS = {
     "files": _natives("files", {
         "size": (1, native_files_size, READ_PATH), "is_dir": (1, native_files_is_dir, READ_PATH),
         "is_link": (1, native_files_is_link, READ_PATH), "next_lines": (3, native_files_next_lines, READ_PATH),
-    }),
+        "sha256_file": (1, native_files_sha256_file, READ_PATH),
+    }, metered=("sha256_file",)),
 }
 
 
@@ -6403,7 +7187,7 @@ def resolve_package(name, start_dir, position):
     directory = os.path.abspath(start_dir or os.getcwd())
     searched = []
     while True:
-        package = os.path.join(directory, PACKAGE_DIR, name)
+        package = os.path.join(directory, PACKAGE_DIR, *name.split("/"))
         if os.path.isfile(os.path.join(package, "nova.json")):
             break
         searched.append(os.path.join(directory, PACKAGE_DIR))
@@ -6496,7 +7280,7 @@ def default_module_name(raw_path, position):
     if is_std_import(raw_path):
         stem = raw_path[len(STD_PREFIX):]
     elif is_package_import(raw_path):
-        stem = raw_path.replace("-", "_").replace(".", "_")
+        stem = raw_path.rsplit("/", 1)[-1].replace("-", "_").replace(".", "_")
     else:
         stem = os.path.splitext(os.path.basename(raw_path))[0]
     if not is_bare_name(stem):
@@ -8603,7 +9387,7 @@ def render_tree(node):
 # ---------------------------------------------------------------------------
 
 WELCOME = """╔═══════════════════════════════════╗
-║       NOVALANG v2.2.0            ║
+║       NOVALANG v2.4.0            ║
 ║   A star-born programming lang   ║
 ║   Type an expression or 'exit'   ║
 ╚═══════════════════════════════════╝"""

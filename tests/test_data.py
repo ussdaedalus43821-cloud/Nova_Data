@@ -381,12 +381,12 @@ class Source(unittest.TestCase):
         for name in ["regex", "python", "write", "remove", "delete", "rename", "copy", "append", "mkdir", "stdin", "env"]:
             self.assertIsNone(re.search(r"\b%s\b" % name, code), "nova_data.nova uses " + name)
 
-    def test_the_only_imports_are_the_standard_decimal_files_and_format_modules(self):
+    def test_the_only_imports_are_the_standard_csv_decimal_files_and_format_modules(self):
         import re
         with open(c.PROGRAM, encoding="utf-8") as f:
             imports = [line.strip() for line in f if line.lstrip().startswith("import")]
-        self.assertEqual(imports, ['import "std:decimal" as dec', 'import "std:files" as files', 'import "std:format" as fmt'])
-        self.assertIsNone(re.search(r"\bimport\b", self.code().replace("import ", "", 3)), "an import in the middle of the program")
+        self.assertEqual(imports, ['import "std:csv" as csv', 'import "std:decimal" as dec', 'import "std:files" as files', 'import "std:format" as fmt'])
+        self.assertIsNone(re.search(r"\bimport\b", self.code().replace("import ", "", 4)), "an import in the middle of the program")
 
     def test_no_round_anywhere_because_round_is_half_to_even(self):
         import re
