@@ -2,21 +2,29 @@
 #
 #   python3 novalang/novalang.py nova_data.nova TRANSACTIONS.CSV
 #
-# The whole tool is this one NovaLang program: no Python host, no imports, no regular expressions. It reads
+# The whole tool is this one NovaLang program: no Python host, no regular expressions, and the only imports are
+# NovaLang's own standard modules (std:decimal and std:format). It reads
 # Date,Description,Amount,Category records, totals them per category, finds the largest single charge and prints
 # a terminal report with dollar amounts and bar charts.
 #
-# The design rule is: MONEY IS NEVER A FLOAT. An amount like "1,250.50" is read by hand into integer cents
-# (125050), every sum is an integer, and the only place cents become text is `money()` below. NovaLang has no
-# decimal type, `round` is half-to-even and `str(5.0)` is "5" (docs/GAPS.md G-043, G-044, and G-008 in
-# Nova_Stats), so a float would be wrong in ways that are easy to miss. A naive float sum is still kept on the
-# side, only so the report can show how far it drifts from the exact one.
+# The design rule is: MONEY IS NEVER A FLOAT. An amount like "1,250.50" is read into an exact decimal with
+# std:decimal (NovaLang's own library: NovaLang has no decimal type, `round` is half-to-even and `str(5.0)` is
+# "5", docs/GAPS.md G-043, G-044, and G-008 in Nova_Stats), every sum is a decimal, and the only place an amount
+# becomes text is `money()` below. Before the library existed this file read amounts by hand into integer cents
+# and divided with its own half-up routine; those helpers are gone, and the report is byte for byte the same
+# (tests/test_data.py). A naive float sum is still kept on the side, only so the report can show how far it
+# drifts from the exact one.
 #
 # Sign convention (a credit-card export): a charge is positive, a refund or credit is negative. "Spent" is the
 # net of both.
 #
 # It reads with `read` and nothing else, and needs only `process` (for args and exit) and, if it is there,
-# `clock` (for the timings). Under the `restricted` profile that is `--allow-read DIR --allow-process`.
+# `clock` (for the timings). Under the `restricted` profile that is `--allow-read DIR --allow-process`: a
+# standard module needs no `import` grant (docs/spec/08-modules.md [mod.std] in NovaLang).
+
+import "std:decimal" as dec
+import "std:format" as fmt
+
 
 let DIGITS = "0123456789"
 let LAST_DAY = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -24,6 +32,7 @@ let EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
 let BAR_WIDTH = 20
 let MAX_CONTINUATION = 8
 let MAX_CATEGORIES = 999
+let ZERO = dec.parse("0.00")
 
 # ---- text helpers the standard library does not have (each points at its entry in docs/GAPS.md) ----
 
@@ -47,69 +56,40 @@ def all_digits(text) {
     }
 }
 
-def two_digits(n) {
-    if n < 10 {
-        return "0" + str(n)
-    }
-    return str(n)
-}
-
-# No thousands separator (G-007 in Nova_Stats). `n` is a non-negative integer.
+# A non-negative whole number with thousands separators (G-007 in Nova_Stats): std:format does it.
 def group_digits(n) {
-    let digits = str(n)
-    let out = ""
-    let count = 0
-    for i = len(digits) - 1 downto 0 {
-        if count > 0 and count % 3 == 0 {
-            out = "," + out
-        }
-        out = digits[i] + out
-        count = count + 1
-    }
-    return out
+    return fmt.grouped(str(n), ",")
 }
 
-# Cents to "$1,250.50" / "-$45.10". `//` and `%` round toward minus infinity (G-045), so the sign is taken off
-# first and the arithmetic is done on the magnitude: -1250050 // 100 is -12501, not -12500.
-def money(cents) {
+# An amount (a decimal with two places) to "$1,250.50" / "-$45.10".
+def money(amount) {
     let sign = ""
-    let magnitude = cents
-    if cents < 0 {
+    if dec.sign(amount) < 0 {
         sign = "-"
-        magnitude = -cents
     }
-    return sign + "$" + group_digits(magnitude // 100) + "." + two_digits(magnitude % 100)
+    return sign + "$" + fmt.grouped(dec.to_string(dec.absolute(amount)), ",")
 }
 
-# a / b rounded half away from zero, for integers with b > 0. There is no integer division that rounds
-# (`round` works on floats, half-to-even: G-043), and a float is exactly what this must avoid.
-def div_round(a, b) {
-    if a < 0 {
-        return -((-a * 2 + b) // (2 * b))
-    }
-    return (a * 2 + b) // (2 * b)
+# The amount in whole cents, as an integer. Only the sort below needs one: sorted() cannot order pairs
+# (G-038 in Nova_Log), so each total is packed into a single number.
+def cents_of(amount) {
+    return dec.to_int(dec.mul(amount, dec.from_int(100)), "down")
 }
 
-# part / whole as a percentage with one decimal, from integers only.
+# part / whole as a percentage with one decimal (half away from zero), "-" when whole is not positive.
 def percent(part, whole) {
-    if whole <= 0 {
+    if dec.sign(whole) <= 0 {
         return "-"
     }
-    let tenths = div_round(part * 1000, whole)
-    let sign = ""
-    if tenths < 0 {
-        sign = "-"
-        tenths = -tenths
-    }
-    return sign + str(tenths // 10) + "." + str(tenths % 10) + "%"
+    return dec.to_string(dec.div(dec.mul(part, dec.from_int(100)), whole, 1, "half_up")) + "%"
 }
 
-# A bar in eighths of a block, so 20 characters give 160 steps, not 20. All integers.
+# A bar in eighths of a block, so 20 characters give 160 steps, not 20.
 def bar(value, biggest) {
-    if value <= 0 or biggest <= 0 {
+    if dec.sign(value) <= 0 or dec.sign(biggest) <= 0 {
         return ""
     }
-    let eighths = div_round(value * BAR_WIDTH * 8, biggest)
+    let eighths = dec.to_int(dec.div(dec.mul(value, dec.from_int(BAR_WIDTH * 8)), biggest, 0, "half_up"), "half_up")
     if eighths < 1 {
         eighths = 1
     }
@@ -119,7 +99,7 @@ def bar(value, biggest) {
 # Seconds with two decimals, from integers (G-008): floor(x + 0.5) is a half-up round of a positive number.
 def seconds_text(x) {
     let hundredths = floor(x * 100 + 0.5)
-    return str(hundredths // 100) + "." + two_digits(hundredths % 100) + " s"
+    return str(hundredths // 100) + "." + fmt.pad_zero(hundredths % 100, 2) + " s"
 }
 
 # "1 record", "2 records". There is no conditional expression and `and`/`or` give only true or false (G-049),
@@ -175,22 +155,23 @@ def is_date(text) {
     return day <= last
 }
 
-# Money text to integer cents: [cents, ""] or [0, "why not"]. Accepts 12, 12.5, 12.50, -12.50, +12.50, $12.50,
-# -$12.50, (12.50) for a negative, and 1,250.50 with correctly placed thousands separators. More than two decimals
-# is refused, not rounded: a fraction of a cent is a data error, and rounding it would need `round`.
-def parse_cents(raw) {
+# Money text to an exact decimal with two places: [amount, ""] or [ZERO, "why not"]. Accepts 12, 12.5, 12.50,
+# -12.50, +12.50, $12.50, -$12.50, (12.50) for a negative, and 1,250.50 with correctly placed thousands
+# separators. More than two decimals is refused, not rounded: a fraction of a cent is a data error.
+# The syntax is checked here (the report says why a row is refused); std:decimal does the number.
+def parse_amount(raw) {
     # The fast path: 1 to 9 digits, a point, two digits. That is nearly every row, and it skips the general path.
     let size = len(raw)
     if size >= 4 and size <= 12 and raw[size - 3] == "." {
         let w = raw[:size - 3]
         let f = raw[size - 2:]
         if all_digits(w) and all_digits(f) {
-            return [num(w) * 100 + num(f), ""]
+            return [dec.parse(raw), ""]
         }
     }
     let text = trim(raw)
     if text == "" {
-        return [0, "amount is empty"]
+        return [ZERO, "amount is empty"]
     }
     let negative = false
     if len(text) >= 3 and text[0] == "(" and text[len(text) - 1] == ")" {
@@ -208,48 +189,47 @@ def parse_cents(raw) {
     }
     let parts = split(text, ".")
     if len(parts) > 2 {
-        return [0, "amount has more than one decimal point: " + raw]
+        return [ZERO, "amount has more than one decimal point: " + raw]
     }
     let whole = parts[0]
     let frac = ""
     if len(parts) == 2 {
         frac = parts[1]
         if len(frac) == 0 {
-            return [0, "amount has a decimal point but no cents: " + raw]
+            return [ZERO, "amount has a decimal point but no cents: " + raw]
         }
     }
     if len(frac) > 2 {
-        return [0, "amount has a fraction of a cent: " + raw]
+        return [ZERO, "amount has a fraction of a cent: " + raw]
     }
     if frac != "" and not all_digits(frac) {
-        return [0, "amount is not money: " + raw]
+        return [ZERO, "amount is not money: " + raw]
     }
     if "," in whole {
         let groups = split(whole, ",")
         for g in groups {
             if not all_digits(g) {
-                return [0, "amount is not money: " + raw]
+                return [ZERO, "amount is not money: " + raw]
             }
         }
         if len(groups[0]) > 3 {
-            return [0, "misplaced thousands separator: " + raw]
+            return [ZERO, "misplaced thousands separator: " + raw]
         }
         for i = 1 to len(groups) - 1 {
             if len(groups[i]) != 3 {
-                return [0, "misplaced thousands separator: " + raw]
+                return [ZERO, "misplaced thousands separator: " + raw]
             }
         }
         whole = join(groups, "")
     }
     if not all_digits(whole) or len(whole) > 12 {
-        return [0, "amount is not money: " + raw]
+        return [ZERO, "amount is not money: " + raw]
     }
-    frac = frac + "0" * (2 - len(frac))
-    let cents = num(whole) * 100 + num(frac)
+    let amount = dec.quantize(dec.parse(whole + "." + frac), 2, "down")
     if negative {
-        cents = -cents
+        amount = dec.negate(amount)
     }
-    return [cents, ""]
+    return [amount, ""]
 }
 
 # ---- CSV (RFC 4180 as far as a bank export needs it) ----
@@ -351,8 +331,6 @@ let width = 0
 
 let counts = {}
 let totals = {}
-let charges = {}
-let refunds = {}
 let records = 0
 let valid = 0
 let blank = 0
@@ -360,14 +338,14 @@ let rejected = 0
 let reject_notes = []
 let charge_count = 0
 let refund_count = 0
-let charge_cents = 0
-let refund_cents = 0
+let charge_total = ZERO
+let refund_total = ZERO
 let float_sum = 0.0
 let first_date = ""
 let last_date = ""
-let best_cents = 0
+let best_amount = ZERO
 let best = []
-let worst_cents = 0
+let worst_amount = ZERO
 let worst = []
 let header_done = false
 let date_ok = {}
@@ -428,7 +406,7 @@ while idx < len(lines) {
 
     records = records + 1
     let why = parsed[1]
-    let cents = 0
+    let amount = ZERO
     if why == "" and len(fields) != width {
         why = "expected " + str(width) + " fields, found " + str(len(fields))
     }
@@ -441,8 +419,8 @@ while idx < len(lines) {
         if not date_ok[date] {
             why = "not a valid date (YYYY-MM-DD): " + date
         } else {
-            let money_parsed = parse_cents(fields[col_amount])
-            cents = money_parsed[0]
+            let money_parsed = parse_amount(fields[col_amount])
+            amount = money_parsed[0]
             why = money_parsed[1]
         }
     }
@@ -468,33 +446,29 @@ while idx < len(lines) {
     }
     if category in counts {
         counts[category] = counts[category] + 1
-        totals[category] = totals[category] + cents
+        totals[category] = dec.add(totals[category], amount)
     } else {
         counts[category] = 1
-        totals[category] = cents
-        charges[category] = 0
-        refunds[category] = 0
+        totals[category] = amount
     }
-    if cents >= 0 {
+    if dec.sign(amount) >= 0 {
         charge_count = charge_count + 1
-        charge_cents = charge_cents + cents
-        charges[category] = charges[category] + cents
+        charge_total = dec.add(charge_total, amount)
         # strictly greater: on a tie the earliest record in the file is the one reported
-        if cents > best_cents {
-            best_cents = cents
+        if dec.cmp(amount, best_amount) > 0 {
+            best_amount = amount
             best = [date, one_line(fields[col_desc]), category, line_no]
         }
     } else {
         refund_count = refund_count + 1
-        refund_cents = refund_cents + cents
-        refunds[category] = refunds[category] + cents
-        if cents < worst_cents {
-            worst_cents = cents
+        refund_total = dec.add(refund_total, amount)
+        if dec.cmp(amount, worst_amount) < 0 {
+            worst_amount = amount
             worst = [date, one_line(fields[col_desc]), category, line_no]
         }
     }
     # the naive way, kept only to be compared with the exact total
-    float_sum = float_sum + cents / 100
+    float_sum = float_sum + dec.to_float(amount)
 }
 let parse_done = read_done
 if have_clock {
@@ -512,14 +486,14 @@ if len(names) > MAX_CATEGORIES {
     print("nova_data: more than " + str(MAX_CATEGORIES) + " categories; the sort key below packs the category number into three digits")
     exit(1)
 }
-let grand = charge_cents + refund_cents
+let grand = dec.add(charge_total, refund_total)
 
 # sorted() cannot order pairs (G-038 in Nova_Log), so each category and its total are packed into one number:
-# total * 1000 + (999 - position in alphabetical order). Descending order is then "biggest total first, then
+# total in cents * 1000 + (999 - position in alphabetical order). Descending order is then "biggest total first, then
 # alphabetical". `//` and `%` floor, so this decodes exactly even when a total is negative.
 let packed = []
 for i = 0 to len(names) - 1 {
-    packed = packed + [totals[names[i]] * 1000 + (999 - i)]
+    packed = packed + [cents_of(totals[names[i]]) * 1000 + (999 - i)]
 }
 packed = sorted(packed, true)
 
@@ -536,7 +510,7 @@ def widest(cells, least) {
 }
 
 let name_width = 8
-let biggest = 0
+let biggest = ZERO
 let cell_name = []
 let cell_n = []
 let cell_total = []
@@ -554,7 +528,7 @@ if valid > 0 {
         if len(n) > name_width {
             name_width = len(n)
         }
-        if totals[n] > biggest {
+        if dec.cmp(totals[n], biggest) > 0 {
             biggest = totals[n]
         }
     }
@@ -566,11 +540,11 @@ if valid > 0 {
         cell_name = cell_name + [pad(fit(n, name_width), name_width)]
         cell_n = cell_n + [group_digits(counts[n])]
         cell_total = cell_total + [money(totals[n])]
-        cell_avg = cell_avg + [money(div_round(totals[n], counts[n]))]
+        cell_avg = cell_avg + [money(dec.div(totals[n], dec.from_int(counts[n]), 2, "half_up"))]
         cell_share = cell_share + [percent(totals[n], grand)]
         cell_bar = cell_bar + [bar(totals[n], biggest)]
     }
-    foot_avg = money(div_round(grand, valid))
+    foot_avg = money(dec.div(grand, dec.from_int(valid), 2, "half_up"))
     w_n = widest(cell_n + [group_digits(valid)], 4)
     w_total = widest(cell_total + [money(grand)], 5)
     w_avg = widest(cell_avg + [foot_avg], 7)
@@ -616,36 +590,36 @@ if valid > 0 {
     foot = foot + pad_left(foot_avg, w_avg + 2) + pad_left("100.0%", w_share + 2)
     print(foot)
     print("")
-    let w_money = widest([money(charge_cents), money(refund_cents)], 10)
-    print("  " + pad("Charges", 9) + pad_left(money(charge_cents), w_money) + "   in " + counted(charge_count, "transaction", "transactions"))
-    print("  " + pad("Refunds", 9) + pad_left(money(refund_cents), w_money) + "   in " + counted(refund_count, "transaction", "transactions"))
+    let w_money = widest([money(charge_total), money(refund_total)], 10)
+    print("  " + pad("Charges", 9) + pad_left(money(charge_total), w_money) + "   in " + counted(charge_count, "transaction", "transactions"))
+    print("  " + pad("Refunds", 9) + pad_left(money(refund_total), w_money) + "   in " + counted(refund_count, "transaction", "transactions"))
 
     print("")
     print("  LARGEST SINGLE TRANSACTION")
     print("  " + thin)
     let w_card = 11
     if len(best) > 0 {
-        w_card = widest([money(best_cents)], w_card)
+        w_card = widest([money(best_amount)], w_card)
     }
     if len(worst) > 0 {
-        w_card = widest([money(worst_cents)], w_card)
+        w_card = widest([money(worst_amount)], w_card)
     }
     let indent = " " * (2 + 8 + w_card + 3)
     if len(best) > 0 {
-        print("  " + pad("Charge", 8) + pad_left(money(best_cents), w_card) + "   " + fit(best[1], 44))
+        print("  " + pad("Charge", 8) + pad_left(money(best_amount), w_card) + "   " + fit(best[1], 44))
         print(indent + best[2] + "  ·  " + best[0] + "  ·  line " + group_digits(best[3]))
     } else {
         print("  (no charges)")
     }
     if len(worst) > 0 {
-        print("  " + pad("Refund", 8) + pad_left(money(worst_cents), w_card) + "   " + fit(worst[1], 44))
+        print("  " + pad("Refund", 8) + pad_left(money(worst_amount), w_card) + "   " + fit(worst[1], 44))
         print(indent + worst[2] + "  ·  " + worst[0] + "  ·  line " + group_digits(worst[3]))
     }
 
-    # The float sum, to show what the integer cents avoid. Fixed-point text is built from integers (G-008 in
+    # The float sum, to show what exact decimals avoid. Fixed-point text is built from integers (G-008 in
     # Nova_Stats): str() of a small float switches to exponent form ("4.8e-08", G-048), which num() cannot read
     # back (G-039 in Nova_Log).
-    let drift_nano = floor(abs(float_sum - grand / 100) * 1000000000 + 0.5)
+    let drift_nano = floor(abs(float_sum - dec.to_float(grand)) * 1000000000 + 0.5)
     let drift_frac = str(drift_nano % 1000000000)
     let drift = "$" + group_digits(drift_nano // 1000000000) + "." + "0" * (9 - len(drift_frac)) + drift_frac
     print("")

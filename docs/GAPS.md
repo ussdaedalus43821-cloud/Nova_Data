@@ -9,6 +9,8 @@ G-001 to G-026, Nova_Sort G-027 to G-035, Nova_Log G-036 to G-042), so these sta
 
 Written against NovaLang v2.2.0 (`develop` at f458f1d). Entries marked **M13** are the ones to fix there.
 
+> **Status after NovaLang 2.3 (M13, 2026-11-14):** G-043 to G-045 and G-048 now have a library route (`std:decimal`, `std:math`, `std:format`), G-050 is fixed in the language (`replace_all` needs no capability), and this program uses the library: its integer-cent helpers are deleted. The gap texts below are the record of what the program had to do before; the probes in `tests/test_gaps.py` that pinned a missing feature are updated where the feature arrived.
+
 **How to read an entry.** *Tried* is what was attempted and the exact result. *Workaround* says what the code does
 instead and **who does the work**: `program` (nova_data.nova), `host` (a Python launcher: none here) or `none` (cannot
 be done). *Probe* is a reproducible check in `tests/`; the ones in `tests/test_gaps.py` pass while the gap exists and

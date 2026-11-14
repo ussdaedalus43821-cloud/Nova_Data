@@ -126,13 +126,15 @@ class Gaps(unittest.TestCase):
                     self.assertIn(message, out)
 
     # --- G-050 ---------------------------------------------------------------------------------------------
-    def test_G050_replace_all_needs_the_regex_capability(self):
+    def test_G050_is_fixed_replace_all_needs_no_capability(self):
+        # Fixed in NovaLang 2.3 (M13 slice 1): replace_all left the `regex` capability. This probe used to pass
+        # while the gap existed (it asserted `undefined name 'replace_all'`) and now pins the fix.
         src = 'print(replace_all("a-b-c", "-", "+"))'
-        self.assertEqual(nova(src), (0, "a+b+c\n"))  # trusted: there
-        code, out = nova(src, flags=["--profile", "restricted"])
+        self.assertEqual(nova(src), (0, "a+b+c\n"))
+        self.assertEqual(nova(src, flags=["--profile", "restricted"]), (0, "a+b+c\n"))
+        code, out = nova('print(regex("a", "a"))', flags=["--profile", "restricted"])  # regex itself is still a capability
         self.assertNotEqual(code, 0)
-        self.assertIn("undefined name 'replace_all'", out)
-        self.assertEqual(nova(src, flags=["--profile", "restricted", "--allow-regex"]), (0, "a+b+c\n"))  # granted: there
+        self.assertIn("undefined name 'regex'", out)
 
     def test_G050_but_split_and_join_do_the_same_job(self):
         src = 'print(join(split("a-b-c", "-"), "+"))'
