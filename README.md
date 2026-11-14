@@ -74,6 +74,9 @@ Before NovaLang had `std:decimal` (it arrived in 2.3, M13 slice 2) this program 
 and divided with its own half-up routine: about 70 lines of helpers (`parse_cents`, `money`, `div_round`, `group_digits`,
 `two_digits`). They are deleted; the report printed for the sample is **byte for byte the same** (compared with the output of
 the previous version, apart from the timing line), and every test that compared it with the `decimal.Decimal` oracle still passes.
+NovaLang 2.4 (M14 slice P1) did the same for the CSV parser and the sort: `std:csv` reads each record's fields and
+`sorted(list, key)` orders the categories, so the hand-written `parse_fields` and the packed-integer sort are deleted, with
+the same byte-for-byte check.
 5. A naive **float** sum is kept on the side purely to be compared (the *Precision check*). On this file the error is
    $0.000000008 after 9,993 additions: tiny, and the point is that the exact figure does not depend on it.
 

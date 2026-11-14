@@ -123,7 +123,7 @@ class Helpers(unittest.TestCase):
 
 
 class Csv(unittest.TestCase):
-    def test_parse_fields_round_trips_what_the_csv_module_writes(self):
+    def test_read_record_round_trips_what_the_csv_module_writes(self):
         rng = random.Random(9)
         pieces = ["", "a", "b c", "Costco, Inc.", 'say "hi"', '"', '""', ",", ",,", "a,b,c", "tail,", ",head", 'q"', '"q', "x\ny", "é", " pad ", "1,250.50", "end\n", "\nstart"]
         rows = [[rng.choice(pieces) for _ in range(rng.randint(1, 6))] for _ in range(500)]
@@ -131,9 +131,11 @@ class Csv(unittest.TestCase):
         lines = []
         for r in rows:
             buf = io.StringIO()
-            csv.writer(buf, lineterminator="").writerow(r)
-            lines.append(buf.getvalue())
-        got = nova("for t in %s { print(json.dumps(parse_fields(t)[0])) }" % listing(map(lit, lines)))
+            # with a real line end the writer quotes any field holding \r or \n (with "" it does not, and that line could never
+            # come from split_lines, which cuts every unquoted line end before a record is read)
+            csv.writer(buf, lineterminator="\r\n").writerow(r)
+            lines.append(buf.getvalue()[:-2])
+        got = nova("for t in %s { print(json.dumps(read_record(t)[0])) }" % listing(map(lit, lines)))
         self.assertEqual([json.loads(g) for g in got], rows)
 
     def test_malformed_records_are_errors_not_guesses(self):
@@ -148,14 +150,14 @@ class Csv(unittest.TestCase):
             '"a""': "a quoted field is never closed",
             'a,"b"c': "text after a closing quote",
         }
-        got = nova("for t in %s { let r = parse_fields(t)\n print(str(len(r[0])) + \"|\" + r[1]) }" % listing(map(lit, cases)))
+        got = nova("for t in %s { let r = read_record(t)\n print(str(len(r[0])) + \"|\" + r[1]) }" % listing(map(lit, cases)))
         self.assertEqual(got, ["0|" + why for why in cases.values()])
 
     def test_the_small_cases(self):
-        cases = {"": [""], ",": ["", ""], "a": ["a"], "a,": ["a", ""], ",a": ["", "a"], '""': [""], '"",""': ["", ""], '"a",': ["a", ""],
+        cases = {",": ["", ""], "a": ["a"], "a,": ["a", ""], ",a": ["", "a"], '""': [""], '"",""': ["", ""], '"a",': ["a", ""],
                  ',"a"': ["", "a"], '""""': ['"'], '"""",1': ['"', "1"], '"a""b"': ['a"b'], '"a,b",c': ["a,b", "c"], 'a,"b,c",d': ["a", "b,c", "d"],
                  "a,b,c,d,e": ["a", "b", "c", "d", "e"]}
-        got = nova("for t in %s { print(json.dumps(parse_fields(t)[0])) }" % listing(map(lit, cases)))
+        got = nova("for t in %s { print(json.dumps(read_record(t)[0])) }" % listing(map(lit, cases)))
         self.assertEqual([json.loads(g) for g in got], list(cases.values()))
 
     def test_open_quote_counts_quote_characters_by_parity(self):

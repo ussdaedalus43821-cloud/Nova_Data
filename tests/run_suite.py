@@ -3,7 +3,7 @@ import os, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STEPS = [
-    ("helpers: money, percent, bar, parse_cents, is_date, parse_fields vs oracles", ["tests.test_units"]),
+    ("helpers: money, percent, bar, parse_cents, is_date, read_record vs oracles", ["tests.test_units"]),
     ("behaviour: whole reports vs the csv + decimal oracle, 3 engines, fuzz", ["tests.test_data"]),
     ("gap probes: what NovaLang lacks, pinned so docs/GAPS.md cannot rot", ["tests.test_gaps"]),
     ("sandbox: restricted profile, read-only, default limits, the ceiling", ["tests.test_sandbox"]),

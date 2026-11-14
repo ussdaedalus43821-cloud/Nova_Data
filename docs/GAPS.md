@@ -10,6 +10,8 @@ G-001 to G-026, Nova_Sort G-027 to G-035, Nova_Log G-036 to G-042), so these sta
 Written against NovaLang v2.2.0 (`develop` at f458f1d). Entries marked **M13** are the ones to fix there.
 
 > **Status after NovaLang 2.3 (M13, 2026-11-14):** G-043 to G-045 and G-048 now have a library route (`std:decimal`, `std:math`, `std:format`), G-050 is fixed in the language (`replace_all` needs no capability), and this program uses the library: its integer-cent helpers are deleted. The gap texts below are the record of what the program had to do before; the probes in `tests/test_gaps.py` that pinned a missing feature are updated where the feature arrived.
+>
+> **Status after NovaLang 2.4 (M14 slice P1):** G-047 has a library route, `std:csv`, and **G-038** (Nova_Log) is fixed in the language: `sorted(list, key)` and `sorted(list, key, descending)`, stable on all three engines. The program uses both: its hand-written field parser (`parse_fields`) and the packed-integer category sort (`cents_of`, the 999-category limit) are deleted. The record framing stays (an odd number of quotes glues up to 8 more lines), because that is what lets a stray quote cost one row; `std:csv` reads the fields of each record. The report is byte for byte the same on the sample and on a set of quote, BOM, CRLF, tie and fuzz files, on all three engines.
 
 **How to read an entry.** *Tried* is what was attempted and the exact result. *Workaround* says what the code does
 instead and **who does the work**: `program` (nova_data.nova), `host` (a Python launcher: none here) or `none` (cannot
@@ -32,7 +34,7 @@ TRAP (works, gives a wrong answer silently) - minor.
 
 Re-confirmed, not new: **G-008** (Nova_Stats; `str(5.0)` is `5`, no formatting: the reason `money()` exists),
 **G-007** (no thousands separator), **G-039** (`num` too loose: why `all_digits` has guards), **G-037** (no `find`),
-**G-038** (`sorted` cannot order pairs: categories are packed into one number), **G-036** and **G-042** (the string and
+**G-038** (`sorted` cannot order pairs: categories were packed into one number; fixed in 2.4 by `sorted(list, key)`), **G-036** and **G-042** (the string and
 time limits: measured for this program under "The ceiling" below), **G-004** (no way to write an ESC: **no colour** in
 the report, for that reason).
 
@@ -118,6 +120,9 @@ the report, for that reason).
 - **Not handled:** a quoted field that legitimately spans more than 9 lines is rejected.
 - **Suggested for M13:** `csv.parse(text)` returning rows (quoted fields, doubled quotes, embedded newlines), like
   `json.loads` already does for JSON.
+- **Arrived (NovaLang 2.4):** `std:csv` (`parse`, `parse_with`, `parse_lines`, `records`, `format`). `read_record` in the
+  program hands each framed record to `csv.parse_with` and turns its three refusals into the same short reasons as
+  before. `split_lines` still cuts a quoted newline, so the probe below still passes.
 - **Probe:** `tests/test_gaps.py` `test_G047_*`.
 
 ## G-048 Small floats print as `1e-07` and cannot be read back; no exponent literal - TRAP (M13)
