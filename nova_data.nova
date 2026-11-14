@@ -3,7 +3,7 @@
 #   python3 novalang/novalang.py nova_data.nova TRANSACTIONS.CSV
 #
 # The whole tool is this one NovaLang program: no Python host, no regular expressions, and the only imports are
-# NovaLang's own standard modules (std:decimal and std:format). It reads
+# NovaLang's own standard modules (std:decimal, std:files and std:format). It reads
 # Date,Description,Amount,Category records, totals them per category, finds the largest single charge and prints
 # a terminal report with dollar amounts and bar charts.
 #
@@ -18,11 +18,14 @@
 # Sign convention (a credit-card export): a charge is positive, a refund or credit is negative. "Spent" is the
 # net of both.
 #
-# It reads with `read` and nothing else, and needs only `process` (for args and exit) and, if it is there,
-# `clock` (for the timings). Under the `restricted` profile that is `--allow-read DIR --allow-process`: a
-# standard module needs no `import` grant (docs/spec/08-modules.md [mod.std] in NovaLang).
+# It reads the file with std:files (in 64 KiB pieces, so a file over the 1,000,000-character string limit of the
+# `restricted` profile is no longer refused, G-036), and needs only `files.read` for that, `process` (for args and exit)
+# and, if it is there, `clock` (for the timings). Under the `restricted` profile that is `--allow-read DIR
+# --allow-process`: a standard module needs no `import` grant, only the capabilities it declares
+# (docs/spec/08-modules.md [mod.std] in NovaLang).
 
 import "std:decimal" as dec
+import "std:files" as files
 import "std:format" as fmt
 
 
@@ -307,9 +310,11 @@ try {
     have_clock = false
 }
 
-let text = ""
+# std:files reads the file in 64 KiB pieces, so a log over the 1,000,000-character string limit of the restricted profile
+# no longer fails (G-036); the lines are the ones split_lines() makes of the whole text.
+let lines = []
 try {
-    text = read(path)
+    lines = files.lines(path)
 } catch e {
     print("nova_data: cannot read " + path + ": " + str(e))
     exit(1)
@@ -318,10 +323,9 @@ let read_done = started
 if have_clock {
     read_done = monotonic()
 }
-if text[:1] == "﻿" {
-    text = text[1:]
+if len(lines) > 0 and lines[0][:1] == "﻿" {
+    lines[0] = lines[0][1:]
 }
-let lines = split_lines(text)
 
 let col_date = -1
 let col_desc = -1

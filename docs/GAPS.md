@@ -160,13 +160,15 @@ Measured with the program as it is, on the VM, an Apple M1, all limits at their 
 | 10,000 (the sample) | 397,577 | **ok, about 2 s** (the headline run, in the tests) |
 | 20,000 | 795,923 | ok, 4.07 s of the 5 s budget |
 | 25,000 | 996,365 | ok, but **4.94 s of 5 s**: one slow moment from failing |
-| 26,000 | 1,036,183 | **refused**: `a string cannot grow beyond 1000000 characters` (G-036) |
+| 26,000 | 1,036,183 | was **refused** with `a string cannot grow beyond 1000000 characters` (G-036); since the program reads with `std:files` it is read and stops at the time limit instead (see the update below) |
 
 The same 26,000-row file runs on the `trusted` profile in 4.4 s and matches the oracle. The two sandbox limits arrive at almost
 the same size for this program (the string limit at about 25,100 rows, and the 5 s time limit at about the same
 point on this machine), so there is no safe margin above about **20,000 rows**. That is G-036 and G-042 again, not new
 gaps; the 25,000-row point is **measured and reported, not pinned** in a test (it would be flaky). What is pinned:
 26,000 rows is refused and one character decides the 1,000,000 boundary (`tests/test_sandbox.py` `Ceiling`).
+
+**Update (M13 slice 3, `std:files`).** The program now reads the file with `files.lines` in 64 KiB pieces instead of `read`, so G-036 no longer limits it: a file over 1,000,000 characters is read in the `restricted` profile, and the limit applies to each line. The ceiling is now only the 5 s time limit (10,000 rows 3.1 s, 15,000 rows 4.4 s, 20,000 and up refused with `LimitError`). The output is byte for byte what `read` gave on nine inputs (the sample, 20,000 rows, a BOM, CRLF, CR-only, no final newline, an empty file, a header only, a missing file). `tests/test_sandbox.py` `Ceiling` pins the new behaviour.
 
 On the **self-hosted engine** the sandbox is far tighter: about 50 records a second (about 100 times slower than the VM here),
 so the 5 s budget ends at roughly **250 rows**. 100 rows run in 2 s; 600 rows die with `LimitError: time limit of 5000 ms exceeded`
