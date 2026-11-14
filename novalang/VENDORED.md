@@ -1,6 +1,6 @@
 # Vendored NovaLang
 
-Copied unmodified from the Nova_Lang repository at **abdb0ad** (the head of pull request 12, M14 slice P1: `std:csv`,
+Copied unmodified from the Nova_Lang repository, `develop` at **34a6256** (the merge of pull request 12, M14 slice P1: `std:csv`,
 `std:dict` and `sorted(list, key)`; it also brings `std:date` and `std:hash`). Every file below was copied from that commit
 with `git show`.
 
