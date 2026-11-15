@@ -88,7 +88,7 @@ report also shows charges and refunds separately and the largest of each.
 | | |
 | --- | --- |
 | Columns | `Date`, `Description`, `Amount`, `Category` in **any order**, extra columns ignored, names case-insensitive, a BOM tolerated |
-| Dates | `YYYY-MM-DD`, a real calendar day (leap years and month lengths checked by hand) |
+| Dates | `YYYY-MM-DD`, a real calendar day (`std:date.is_date`: leap years and month lengths) |
 | Amounts | `12`, `12.5`, `12.50`, `-12.50`, `+12.50`, `$12.50`, `-$12.50`, `(12.50)`, `"1,250.50"` |
 | CSV | quoted fields, `""` for a quote, commas and **newlines inside quotes**, CRLF, blank lines, no final newline |
 | Empty category | counted as `Uncategorized` |

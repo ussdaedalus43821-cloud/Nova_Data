@@ -25,13 +25,13 @@
 # (docs/spec/08-modules.md [mod.std] in NovaLang).
 
 import "std:csv" as csv
+import "std:date" as dates
 import "std:decimal" as dec
 import "std:files" as files
 import "std:format" as fmt
 
 
 let DIGITS = "0123456789"
-let LAST_DAY = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 let EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
 let BAR_WIDTH = 20
 let MAX_CONTINUATION = 8
@@ -124,33 +124,8 @@ def fit(text, width) {
 
 # ---- validation by hand (num() throws on bad text and accepts more than digits: G-039 in Nova_Log) ----
 
-def is_leap(year) {
-    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
-}
-
-# "YYYY-MM-DD", a real calendar day. No date type, no parser (G-046).
-def is_date(text) {
-    if len(text) != 10 or text[4] != "-" or text[7] != "-" {
-        return false
-    }
-    let y = text[:4]
-    let m = text[5:7]
-    let d = text[8:]
-    if not (all_digits(y) and all_digits(m) and all_digits(d)) {
-        return false
-    }
-    let year = num(y)
-    let month = num(m)
-    let day = num(d)
-    if year < 1 or month < 1 or month > 12 or day < 1 {
-        return false
-    }
-    let last = LAST_DAY[month - 1]
-    if month == 2 and is_leap(year) {
-        last = 29
-    }
-    return day <= last
-}
+# "YYYY-MM-DD", a real calendar day (years 1 to 9999): std:date.is_date (G-046 closed in NovaLang 2.4).
+# The module is imported as `dates` because the main loop keeps a row's date in a variable named `date`.
 
 # Money text to an exact decimal with two places: [amount, ""] or [ZERO, "why not"]. Accepts 12, 12.5, 12.50,
 # -12.50, +12.50, $12.50, -$12.50, (12.50) for a negative, and 1,250.50 with correctly placed thousands
@@ -394,7 +369,7 @@ while idx < len(lines) {
         let date = trim(fields[col_date])
         # a file has a few hundred distinct dates and thousands of rows, so each date is checked once
         if not (date in date_ok) {
-            date_ok[date] = is_date(date)
+            date_ok[date] = dates.is_date(date)
         }
         if not date_ok[date] {
             why = "not a valid date (YYYY-MM-DD): " + date

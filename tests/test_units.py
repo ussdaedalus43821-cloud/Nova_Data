@@ -116,10 +116,10 @@ class Helpers(unittest.TestCase):
         alphabet = "0123456789-"
         cases += ["".join(rng.choice(alphabet) for _ in range(rng.choice([8, 9, 10, 10, 10, 11]))) for _ in range(300)]
         cases += ["2025-02-29", "2024-02-29", "2025-1-5", "2025/01/01", "20250101", "", "2025-01-01 ", "٢٠٢٥-01-01", "0000-01-01", "9999-12-31"]
-        got = nova("for t in %s { print(is_date(t)) }" % listing(map(lit, cases)))
+        got = nova("for t in %s { print(dates.is_date(t)) }" % listing(map(lit, cases)))
         want = [str(c.oracle_date(t)).lower() for t in cases]
         bad = [(t, g, w) for t, g, w in zip(cases, got, want) if g != w]
-        self.assertEqual(bad, [], "is_date disagrees with datetime (text, program, oracle)")
+        self.assertEqual(bad, [], "std:date.is_date disagrees with datetime (text, program, oracle)")
 
 
 class Csv(unittest.TestCase):

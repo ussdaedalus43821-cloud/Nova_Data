@@ -26,7 +26,7 @@ TRAP (works, gives a wrong answer silently) - minor.
 | G-043 | `round()` is half-to-even: `round(2.5)` is 2, `round(0.5)` is 0 | TRAP (money) | program (never rounds money) | yes |
 | G-044 | No decimal or fixed-point type; floats drift; an int and a float cannot be told apart | FRICTION (the central one) | program (integer cents, hand-parsed) | yes |
 | G-045 | `//` and `%` round toward minus infinity, so negative cents format wrong; no `trunc`/`divmod`/`int` | TRAP | program (sign taken off first) | yes |
-| G-046 | No date support at all; `max`/`min` refuse text; calendar checked by hand | FRICTION | program | yes |
+| G-046 | No date support at all; `max`/`min` refuse text; calendar checked by hand | FRICTION, **closed in 2.4** | `std:date.is_date` | yes |
 | G-047 | No CSV reader, and `split_lines` cuts a quoted newline in two | FRICTION | program (re-glue, capped) | yes |
 | G-048 | Small floats print as `1e-07`, which `num()` cannot read back; no exponent literal | TRAP | program (avoids `str` of a float) | yes |
 | G-049 | No `+=`, no conditional expression, and `and`/`or` return only true or false | minor | program | yes |
@@ -103,6 +103,10 @@ the report, for that reason).
   first draft: it accepted year `0000`.
 - **Suggested for M13:** `parse_date(text)` returning a number of days (or a record), with `nil`/an error for an
   impossible day; `max`/`min` on text.
+- **Closed (NovaLang 2.4):** the hand-written `is_date`, `is_leap` and month table are deleted; the program calls
+  `std:date.is_date` (imported as `dates`, because a row's date lives in a variable named `date`). The same oracle
+  test now runs against the library, and the report is byte for byte the same on the sample and on four generated files
+  full of impossible dates (VM and tree-walker). The probes still pass: the names are still not builtins.
 - **Probe:** `tests/test_gaps.py` `test_G046_*`.
 
 ## G-047 No CSV reader, and `split_lines` cuts a quoted newline in two - FRICTION (M13)

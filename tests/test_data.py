@@ -385,8 +385,8 @@ class Source(unittest.TestCase):
         import re
         with open(c.PROGRAM, encoding="utf-8") as f:
             imports = [line.strip() for line in f if line.lstrip().startswith("import")]
-        self.assertEqual(imports, ['import "std:csv" as csv', 'import "std:decimal" as dec', 'import "std:files" as files', 'import "std:format" as fmt'])
-        self.assertIsNone(re.search(r"\bimport\b", self.code().replace("import ", "", 4)), "an import in the middle of the program")
+        self.assertEqual(imports, ['import "std:csv" as csv', 'import "std:date" as dates', 'import "std:decimal" as dec', 'import "std:files" as files', 'import "std:format" as fmt'])
+        self.assertIsNone(re.search(r"\bimport\b", self.code().replace("import ", "", 5)), "an import in the middle of the program")
 
     def test_no_round_anywhere_because_round_is_half_to_even(self):
         import re
