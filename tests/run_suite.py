@@ -7,6 +7,7 @@ STEPS = [
     ("behaviour: whole reports vs the csv + decimal oracle, 3 engines, fuzz", ["tests.test_data"]),
     ("gap probes: what NovaLang lacks, pinned so docs/GAPS.md cannot rot", ["tests.test_gaps"]),
     ("sandbox: restricted profile, read-only, default limits, the ceiling", ["tests.test_sandbox"]),
+    ("chaos: a million columns, an open quote, 5,000 digits, a null byte", ["tests.test_chaos"]),
 ]
 failed = False
 total = 0
